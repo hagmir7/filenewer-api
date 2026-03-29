@@ -888,8 +888,6 @@ class PDFToJPGView(APIView):
             )
 
 
-
-
 class WordToPDFView(APIView):
     """
     POST /api/convert/word/pdf/
@@ -939,3 +937,158 @@ class WordToPDFView(APIView):
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         response["Content-Length"] = len(pdf_bytes)
         return response
+
+
+#
+
+class EncryptPDFView(APIView):
+    """
+    POST /api/pdf/encrypt/
+    Upload a PDF → returns encrypted PDF.
+
+    Form fields:
+        file             : PDF file              (required)
+        user_password    : open password         (required)
+        owner_password   : owner password        (default: same as user)
+        allow_printing   : true | false          (default: true)
+        allow_copying    : true | false          (default: true)
+        allow_editing    : true | false          (default: true)
+        allow_annotations: true | false          (default: true)
+        filename         : output filename       (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        user_password = request.data.get("user_password", "").strip()
+        owner_password = request.data.get("owner_password", None)
+        allow_printing = request.data.get("allow_printing", "true").lower() == "true"
+        allow_copying = request.data.get("allow_copying", "true").lower() == "true"
+        allow_editing = request.data.get("allow_editing", "true").lower() == "true"
+        allow_annotations = (
+            request.data.get("allow_annotations", "true").lower() == "true"
+        )
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+        if not user_password:
+            return Response({"error": "user_password is required."}, status=400)
+        if len(user_password) < 4:
+            return Response(
+                {"error": "user_password must be at least 4 characters."},
+                status=400,
+            )
+
+        if not filename:
+            filename = file.name.replace(".pdf", "_encrypted.pdf")
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+
+        # ── Convert ───────────────────────────────
+        try:
+            encrypted_bytes = encrypt_pdf(
+                file,
+                user_password=user_password,
+                owner_password=owner_password,
+                allow_printing=allow_printing,
+                allow_copying=allow_copying,
+                allow_editing=allow_editing,
+                allow_annotations=allow_annotations,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return encrypted PDF ───────────────────
+        response = HttpResponse(encrypted_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(encrypted_bytes)
+        return response
+
+
+class DecryptPDFView(APIView):
+    """
+    POST /api/pdf/decrypt/
+    Upload an encrypted PDF + password → returns decrypted PDF.
+
+    Form fields:
+        file     : encrypted PDF file   (required)
+        password : PDF password         (required)
+        filename : output filename      (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        password = request.data.get("password", "").strip()
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+        if not password:
+            return Response({"error": "password is required."}, status=400)
+
+        if not filename:
+            filename = file.name.replace(".pdf", "_decrypted.pdf")
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+
+        # ── Decrypt ───────────────────────────────
+        try:
+            decrypted_bytes = decrypt_pdf(file, password=password)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return decrypted PDF ───────────────────
+        response = HttpResponse(decrypted_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(decrypted_bytes)
+        return response
+
+
+class PDFInfoView(APIView):
+    """
+    POST /api/pdf/info/
+    Upload a PDF → returns metadata and encryption info.
+
+    Form fields:
+        file     : PDF file     (required)
+        password : PDF password (optional, for encrypted PDFs)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        password = request.data.get("password", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+
+        # ── Get info ──────────────────────────────
+        try:
+            info = get_pdf_info(file, password=password)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(info)

@@ -1282,3 +1282,229 @@ def word_to_pdf(source, filename: str = "document.docx") -> bytes:
     doc.build(story)
     buffer.seek(0)
     return buffer.read()
+
+
+def encrypt_pdf(
+    source,
+    user_password: str = "",
+    owner_password: str = None,
+    allow_printing: bool = True,
+    allow_copying: bool = True,
+    allow_editing: bool = True,
+    allow_annotations: bool = True,
+) -> bytes:
+    """
+    Encrypt a PDF with password protection and permissions.
+
+    Args:
+        source           : uploaded file object OR raw bytes
+        user_password    : password required to open the PDF
+        owner_password   : password for full access (default: same as user)
+        allow_printing   : allow printing                (default: True)
+        allow_copying    : allow copying text            (default: True)
+        allow_editing    : allow editing                 (default: True)
+        allow_annotations: allow adding annotations      (default: True)
+
+    Returns:
+        Raw bytes of the encrypted PDF
+    """
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import NameObject
+    import pypdf.constants as pdfconst
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Validate it is a real PDF ──────────────────
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Read + Write ──────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # Check if already encrypted
+    if reader.is_encrypted:
+        raise ValueError(
+            "PDF is already encrypted. " "Please decrypt it first before re-encrypting."
+        )
+
+    writer = PdfWriter()
+
+    # ── Copy all pages ─────────────────────────────
+    for page in reader.pages:
+        writer.add_page(page)
+
+    # ── Copy metadata ──────────────────────────────
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Set owner password ─────────────────────────
+    if owner_password is None:
+        owner_password = user_password
+
+    # ── Build permissions ─────────────────────────
+    permissions = build_permissions(
+        allow_printing=allow_printing,
+        allow_copying=allow_copying,
+        allow_editing=allow_editing,
+        allow_annotations=allow_annotations,
+    )
+
+    # ── Encrypt ────────────────────────────────────
+    writer.encrypt(
+        user_password=user_password,
+        owner_password=owner_password,
+        use_128bit=True,
+        permissions_flag=permissions,
+    )
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def build_permissions(
+    allow_printing: bool = True,
+    allow_copying: bool = True,
+    allow_editing: bool = True,
+    allow_annotations: bool = True,
+) -> int:
+    """
+    Build PDF permissions flag.
+
+    PDF permission bits (128-bit RC4):
+        Bit 3  → Print
+        Bit 4  → Modify contents
+        Bit 5  → Copy / extract text
+        Bit 6  → Annotations
+        Bit 9  → Fill forms
+        Bit 10 → Extract for accessibility
+        Bit 11 → Assemble document
+        Bit 12 → Print high quality
+    """
+    # Start with base permissions (bits 1,2 always 0; rest 1)
+    permissions = 0b11111111111111111111111100000000
+
+    if not allow_printing:
+        permissions &= ~(1 << 2)  # clear bit 3
+        permissions &= ~(1 << 11)  # clear bit 12 (high quality print)
+
+    if not allow_editing:
+        permissions &= ~(1 << 3)  # clear bit 4
+        permissions &= ~(1 << 8)  # clear bit 9  (forms)
+        permissions &= ~(1 << 10)  # clear bit 11 (assemble)
+
+    if not allow_copying:
+        permissions &= ~(1 << 4)  # clear bit 5
+        permissions &= ~(1 << 9)  # clear bit 10 (accessibility)
+
+    if not allow_annotations:
+        permissions &= ~(1 << 5)  # clear bit 6
+
+    return permissions
+
+
+def decrypt_pdf(source, password: str) -> bytes:
+    """
+    Decrypt / remove password from a PDF.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : password to decrypt the PDF
+
+    Returns:
+        Raw bytes of the decrypted PDF
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # ── Check if encrypted ─────────────────────────
+    if not reader.is_encrypted:
+        raise ValueError("PDF is not encrypted.")
+
+    # ── Decrypt ────────────────────────────────────
+    result = reader.decrypt(password)
+    if result == 0:
+        raise ValueError("Wrong password. Could not decrypt PDF.")
+
+    # ── Copy to new writer (removes encryption) ────
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def get_pdf_info(source, password: str = None) -> dict:
+    """
+    Get PDF metadata and encryption info.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : password if encrypted (optional)
+
+    Returns:
+        dict with PDF info
+    """
+    from pypdf import PdfReader
+
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # ── Decrypt if needed ──────────────────────────
+    if reader.is_encrypted:
+        if not password:
+            return {
+                "encrypted": True,
+                "pages": None,
+                "metadata": None,
+                "permissions": None,
+                "message": "PDF is encrypted. Provide password to get full info.",
+            }
+        result = reader.decrypt(password)
+        if result == 0:
+            raise ValueError("Wrong password.")
+
+    # ── Collect metadata ───────────────────────────
+    meta = {}
+    if reader.metadata:
+        meta = {
+            "title": reader.metadata.get("/Title", ""),
+            "author": reader.metadata.get("/Author", ""),
+            "subject": reader.metadata.get("/Subject", ""),
+            "creator": reader.metadata.get("/Creator", ""),
+            "producer": reader.metadata.get("/Producer", ""),
+            "created": str(reader.metadata.get("/CreationDate", "")),
+            "modified": str(reader.metadata.get("/ModDate", "")),
+        }
+
+    return {
+        "encrypted": reader.is_encrypted,
+        "pages": len(reader.pages),
+        "metadata": meta,
+        "file_size": len(pdf_bytes),
+        "pdf_version": reader.pdf_header,
+    }

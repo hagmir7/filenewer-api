@@ -14,8 +14,12 @@ urlpatterns = [
     path('tools/excel-to-csv', ExcelToCSVView.as_view(), name='excel-to-csv'),
     path('tools/json-text-to-excel',       JSONTextToExcelView.as_view(), name='json-text-to-excel'),
     path('tools/json-file-to-excel',  JSONFileToExcelView.as_view(), name='json-file-to-excel'),
-    path('tools/pdf-to-jpg',          PDFToJPGView.as_view(),        name='pdf-to-jpg'),
-    path('tools/pdf-to-excel', PDFToExcelView.as_view(), name='pdf-to-excel'),
-    path('tools/word-to-pdf',         WordToPDFView.as_view(),       name='word-to-pdf'),
+
+    path("tools/pdf-to-jpg", PDFToJPGView.as_view(), name="pdf-to-jpg"),
+    path("tools/pdf-to-excel", PDFToExcelView.as_view(), name="pdf-to-excel"),
+    path("tools/word-to-pdf", WordToPDFView.as_view(), name="word-to-pdf"),
+    path("tools/pdf-encrypt", EncryptPDFView.as_view(), name="pdf-encrypt"),
+    path("tools/pdf-decrypt", DecryptPDFView.as_view(), name="pdf-decrypt"),
+    path("tools/pdf-info", PDFInfoView.as_view(), name="pdf-info"),
     path("health/", HealthCheckView.as_view(), name="health-check"),
 ]

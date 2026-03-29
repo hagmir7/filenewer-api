@@ -1,7 +1,8 @@
 import logging
 import os
 from pathlib import Path
-
+import base64
+import zipfile
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
@@ -194,9 +195,6 @@ class CSVTextToSQLView(APIView):
         return Response({"sql": sql, "table": table_name, "dialect": dialect})
 
 
-from .services import csv_to_sql, csv_to_json  # ← add csv_to_json
-
-
 class CSVFileToJSONView(APIView):
     """
     POST /api/convert/file/json/
@@ -289,9 +287,6 @@ class CSVTextToJSONView(APIView):
                 ),
             }
         )
-
-
-from .services import csv_to_sql, csv_to_json, json_to_csv  # ← add json_to_csv
 
 
 class JSONFileToCSVView(APIView):
@@ -477,7 +472,470 @@ class ExcelToCSVView(APIView):
             return response
 
 
+class JSONFileToExcelView(APIView):
+    """
+    POST /api/convert/json/excel/file/
+    Upload a .json file → returns .xlsx file.
+
+    Form fields:
+        file       : JSON file     (required)
+        sheet_name : sheet name    (default: Sheet1)
+        output     : text | file   (default: file)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        sheet_name = request.data.get("sheet_name", "Sheet1")
+        output = request.data.get("output", "file")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.endswith(".json"):
+            return Response({"error": "Only .json files are accepted."}, status=400)
+
+        # ── Convert ───────────────────────────────
+        try:
+            excel_bytes = json_to_excel(file, sheet_name=sheet_name)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        filename = file.name.replace(".json", ".xlsx")
+        response = HttpResponse(
+            excel_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(excel_bytes)
+        return response
+
+
+class JSONTextToExcelView(APIView):
+    """
+    POST /api/convert/json/excel/
+    Send JSON in body → returns .xlsx file.
+
+    JSON body (single sheet):
+        {
+            "json"      : [{...}, {...}],
+            "sheet_name": "Users",
+            "output"    : "file"
+        }
+
+    JSON body (multi-sheet):
+        {
+            "sheets": {
+                "Users"  : [{...}, {...}],
+                "Orders" : [{...}, {...}]
+            }
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        sheets_input = request.data.get("sheets")  # multi-sheet
+        json_input = request.data.get("json")  # single sheet
+        sheet_name = request.data.get("sheet_name", "Sheet1")
+        output = request.data.get("output", "file")
+        filename = request.data.get("filename", "output.xlsx")
+
+        # ── Validate ──────────────────────────────
+        if not sheets_input and not json_input:
+            return Response(
+                {
+                    "error": 'Provide either "json" (single sheet) or "sheets" (multi-sheet).'
+                },
+                status=400,
+            )
+
+        if not filename.endswith(".xlsx"):
+            filename += ".xlsx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            if sheets_input:
+                # Multi-sheet mode
+                if not isinstance(sheets_input, dict):
+                    return Response(
+                        {"error": '"sheets" must be an object: {"SheetName": [...]}'},
+                        status=400,
+                    )
+                excel_bytes = json_to_excel_multisheets(sheets_input)
+            else:
+                # Single sheet mode
+                excel_bytes = json_to_excel(json_input, sheet_name=sheet_name)
+
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON input."}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        response = HttpResponse(
+            excel_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(excel_bytes)
+        return response
+
+
+class CSVFileToExcelView(APIView):
+    """
+    POST /api/convert/csv/excel/file/
+    Upload a .csv file → returns .xlsx file.
+
+    Form fields:
+        file       : CSV file           (required)
+        sheet_name : sheet name         (default: Sheet1)
+        separator  : column separator   (default: auto-detect)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        sheet_name = request.data.get("sheet_name", "Sheet1")
+        separator = request.data.get("separator", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.endswith(".csv"):
+            return Response({"error": "Only .csv files are accepted."}, status=400)
+
+        # ── Convert ───────────────────────────────
+        try:
+            excel_bytes = csv_to_excel(
+                file,
+                sheet_name=sheet_name,
+                separator=separator,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        filename = file.name.replace(".csv", ".xlsx")
+        response = HttpResponse(
+            excel_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument" ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(excel_bytes)
+        return response
+
+
+class CSVTextToExcelView(APIView):
+    """
+    POST /api/convert/csv/excel/
+    Send raw CSV text in JSON body → returns .xlsx file.
+
+    JSON body (single sheet):
+        {
+            "csv"       : "col1,col2\\nval1,val2",
+            "sheet_name": "Sheet1",
+            "separator" : ",",
+            "filename"  : "output.xlsx"
+        }
+
+    JSON body (multi-sheet):
+        {
+            "sheets": {
+                "Users"  : "col1,col2\\nval1,val2",
+                "Orders" : "col1,col2\\nval1,val2"
+            },
+            "separator": ",",
+            "filename" : "report.xlsx"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        csv_input = request.data.get("csv")
+        sheets_input = request.data.get("sheets")
+        sheet_name = request.data.get("sheet_name", "Sheet1")
+        separator = request.data.get("separator", None)
+        filename = request.data.get("filename", "output.xlsx")
+
+        # ── Validate ──────────────────────────────
+        if not csv_input and not sheets_input:
+            return Response(
+                {
+                    "error": 'Provide either "csv" (single sheet) or "sheets" (multi-sheet).'
+                },
+                status=400,
+            )
+
+        if not filename.endswith(".xlsx"):
+            filename += ".xlsx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            if sheets_input:
+                if not isinstance(sheets_input, dict):
+                    return Response(
+                        {
+                            "error": '"sheets" must be an object: {"SheetName": "csv..."}'
+                        },
+                        status=400,
+                    )
+                excel_bytes = csv_to_excel_multisheets(
+                    sheets_input, separator=separator
+                )
+            else:
+                excel_bytes = csv_to_excel(
+                    csv_input,
+                    sheet_name=sheet_name,
+                    separator=separator,
+                )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        response = HttpResponse(
+            excel_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument" ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(excel_bytes)
+        return response
+
+
+class PDFToExcelView(APIView):
+    """
+    POST /api/convert/pdf/excel/
+    Upload a PDF file → returns .xlsx file.
+
+    Form fields:
+        file     : PDF file              (required)
+        password : PDF password          (optional)
+        filename : output filename       (default: output.xlsx)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        password = request.data.get("password", None)
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+
+        if not filename:
+            filename = file.name.replace(".pdf", ".xlsx").replace(".PDF", ".xlsx")
+        if not filename.endswith(".xlsx"):
+            filename += ".xlsx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            excel_bytes = pdf_to_excel(file, password=password)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        response = HttpResponse(
+            excel_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument" ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(excel_bytes)
+        return response
+
+
+class PDFToJPGView(APIView):
+    """
+    POST /api/convert/pdf/jpg/
+    Upload a PDF file → returns JPG image(s).
+
+    Form fields:
+        file     : PDF file                         (required)
+        dpi      : image resolution                 (default: 200)
+        quality  : JPG quality 1-95                 (default: 85)
+        password : PDF password                     (optional)
+        output   : single | zip | base64            (default: zip)
+                   - single  → first page only as .jpg download
+                   - zip     → all pages as .zip of .jpg files
+                   - base64  → JSON with base64 encoded images
+        page     : specific page number             (default: all)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        dpi = int(request.data.get("dpi", 200))
+        quality = int(request.data.get("quality", 85))
+        password = request.data.get("password", None)
+        output = request.data.get("output", "zip")
+        page = request.data.get("page", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+        if output not in ("single", "zip", "base64"):
+            return Response(
+                {"error": "output must be single, zip, or base64."},
+                status=400,
+            )
+        if not (1 <= quality <= 95):
+            return Response(
+                {"error": "quality must be between 1 and 95."},
+                status=400,
+            )
+        if not (72 <= dpi <= 600):
+            return Response(
+                {"error": "dpi must be between 72 and 600."},
+                status=400,
+            )
+
+        # ── Convert ───────────────────────────────
+        try:
+            pages = pdf_to_jpg(file, dpi=dpi, quality=quality, password=password)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        if not pages:
+            return Response({"error": "No pages found in PDF."}, status=400)
+
+        # ── Filter specific page if requested ──────
+        if page is not None:
+            try:
+                page = int(page)
+                pages = [p for p in pages if p["page"] == page]
+                if not pages:
+                    return Response(
+                        {"error": f"Page {page} not found in PDF."},
+                        status=400,
+                    )
+            except ValueError:
+                return Response({"error": "page must be an integer."}, status=400)
+
+        base_name = file.name.replace(".pdf", "").replace(".PDF", "")
+
+        # ── Output: single page .jpg download ─────
+        if output == "single":
+            first = pages[0]
+            response = HttpResponse(first["bytes"], content_type="image/jpeg")
+            response["Content-Disposition"] = (
+                f'attachment; filename="{base_name}_page_{first["page"]}.jpg"'
+            )
+            response["Content-Length"] = len(first["bytes"])
+            return response
+
+        # ── Output: zip of all pages ───────────────
+        if output == "zip":
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in pages:
+                    zf.writestr(
+                        f'{base_name}_page_{p["page"]}.jpg',
+                        p["bytes"],
+                    )
+            zip_buffer.seek(0)
+
+            response = HttpResponse(
+                zip_buffer.read(),
+                content_type="application/zip",
+            )
+            response["Content-Disposition"] = (
+                f'attachment; filename="{base_name}_pages.zip"'
+            )
+            return response
+
+        # ── Output: base64 JSON response ───────────
+        if output == "base64":
+            data = [
+                {
+                    "page": p["page"],
+                    "filename": f'{base_name}_page_{p["page"]}.jpg',
+                    "width": p["width"],
+                    "height": p["height"],
+                    "base64": base64.b64encode(p["bytes"]).decode("utf-8"),
+                    "size_kb": round(len(p["bytes"]) / 1024, 2),
+                }
+                for p in pages
+            ]
+            return Response(
+                {
+                    "total_pages": len(data),
+                    "dpi": dpi,
+                    "quality": quality,
+                    "pages": data,
+                }
+            )
 
 
 
 
+class WordToPDFView(APIView):
+    """
+    POST /api/convert/word/pdf/
+    Upload a Word file (.docx / .doc) → returns PDF.
+
+    Form fields:
+        file     : Word file (.docx / .doc)   (required)
+        filename : output filename             (default: document.pdf)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith((".docx", ".doc")):
+            return Response(
+                {"error": "Only .docx or .doc files are accepted."},
+                status=400,
+            )
+
+        if not filename:
+            filename = (
+                file.name.replace(".docx", ".pdf")
+                .replace(".doc", ".pdf")
+                .replace(".DOCX", ".pdf")
+                .replace(".DOC", ".pdf")
+            )
+
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+
+        # ── Convert ───────────────────────────────
+        try:
+            pdf_bytes = word_to_pdf(file, filename=file.name)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(pdf_bytes)
+        return response

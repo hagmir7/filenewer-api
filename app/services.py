@@ -13,6 +13,7 @@ import re
 import logging
 from pathlib import Path
 import pandas as pd
+import json
 
 import pdfplumber
 from docx import Document
@@ -263,3 +264,111 @@ def csv_to_json(source, separator: str = None, orient: str = "records") -> list 
 
     # ── Convert to JSON-serializable object ────────
     return df.to_dict(orient=orient)
+
+
+def json_to_csv(source, separator: str = ",") -> str:
+    """
+    Convert JSON (file, raw text, or dict/list) → CSV string.
+
+    Args:
+        source    : uploaded file object | raw JSON string | list | dict
+        separator : column separator (default: ',')
+
+    Returns:
+        CSV string
+    """
+    # ── Parse input ───────────────────────────────
+    if isinstance(source, (list, dict)):
+        data = source  # already parsed
+    elif isinstance(source, str):
+        data = json.loads(source)  # raw JSON string
+    else:
+        raw = source.read().decode("utf-8")  # file object
+        data = json.loads(raw)
+
+    # ── Handle nested/wrapped JSON ─────────────────
+    # e.g. { "data": [ {...}, {...} ] }
+    if isinstance(data, dict):
+        # find the first key whose value is a list
+        for key, val in data.items():
+            if isinstance(val, list):
+                data = val
+                break
+        else:
+            data = [data]  # single object → wrap in list
+
+    if not isinstance(data, list):
+        raise ValueError("JSON must be an array of objects or a wrapped array.")
+
+    # ── Convert to DataFrame → CSV ─────────────────
+    df = pd.json_normalize(data)  # flattens nested objects
+    df.columns = [sanitize_name(c) for c in df.columns]
+
+    return df.to_csv(index=False, sep=separator)
+
+
+def excel_to_csv(source, sheet_name=None, separator: str = ",") -> dict:
+    """
+    Convert Excel file (.xlsx / .xls) → CSV string(s).
+
+    Args:
+        source     : uploaded file object or file path
+        sheet_name : specific sheet name or index (None = all sheets)
+        separator  : column separator (default: ',')
+
+    Returns:
+        {
+            'sheets': {
+                'Sheet1': 'csv string...',
+                'Sheet2': 'csv string...',
+            },
+            'total_sheets': 2,
+        }
+    """
+    # ── Read Excel ────────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        xls = pd.ExcelFile(io.BytesIO(raw))  # ← BytesIO for binary
+    else:
+        xls = pd.ExcelFile(source)
+
+    available_sheets = xls.sheet_names
+
+    # ── Decide which sheets to convert ────────────
+    if sheet_name is not None:
+        # single sheet by name or index
+        if isinstance(sheet_name, int):
+            if sheet_name >= len(available_sheets):
+                raise ValueError(
+                    f"Sheet index {sheet_name} out of range. "
+                    f"Available: 0-{len(available_sheets)-1}"
+                )
+            sheet_name = available_sheets[sheet_name]
+
+        if sheet_name not in available_sheets:
+            raise ValueError(
+                f"Sheet '{sheet_name}' not found. "
+                f"Available sheets: {available_sheets}"
+            )
+        sheets_to_convert = [sheet_name]
+    else:
+        sheets_to_convert = available_sheets
+
+    # ── Convert each sheet → CSV ──────────────────
+    result = {}
+    for name in sheets_to_convert:
+        df = pd.read_excel(xls, sheet_name=name, engine=None)
+
+        # Clean column names
+        df.columns = [sanitize_name(str(c)) for c in df.columns]
+
+        # Replace NaN with empty string for clean CSV
+        df = df.fillna("")
+
+        result[name] = df.to_csv(index=False, sep=separator)
+
+    return {
+        "sheets": result,
+        "total_sheets": len(result),
+        "sheet_names": list(result.keys()),
+    }

@@ -7,5 +7,8 @@ urlpatterns = [
     path("tools/csv-text-to-sql", CSVTextToSQLView.as_view(), name="csv-text-to-sql"),
     path("tools/csv-file-to-json", CSVFileToJSONView.as_view(), name="csv-file-to-json"),
     path("tools/csv-text-to-json", CSVTextToJSONView.as_view(), name="csv-text-to-json"),
+    path('tools/json-file-to-csv',  JSONFileToCSVView.as_view(), name='json-file-to-csv'),
+    path('tools/json-text-to-csv',  JSONTextToCSVView.as_view(), name='json-text-to-csv'),
+    path('tools/excel-to-csv', ExcelToCSVView.as_view(), name='excel-to-csv'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
 ]

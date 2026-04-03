@@ -20,6 +20,8 @@ urlpatterns = [
     path("tools/word-to-pdf", WordToPDFView.as_view(), name="word-to-pdf"),
     path("tools/pdf-encrypt", EncryptPDFView.as_view(), name="pdf-encrypt"),
     path("tools/pdf-decrypt", DecryptPDFView.as_view(), name="pdf-decrypt"),
+     path('tools/pdf-compress',             CompressPDFView.as_view(),     name='pdf-compress'),
+     path('tools/pdf-to-png',          PDFToPNGView.as_view(),        name='pdf-to-png'),
     path("tools/pdf-info", PDFInfoView.as_view(), name="pdf-info"),
     path("health/", HealthCheckView.as_view(), name="health-check"),
 ]

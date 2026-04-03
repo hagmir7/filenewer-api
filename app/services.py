@@ -1508,3 +1508,275 @@ def get_pdf_info(source, password: str = None) -> dict:
         "file_size": len(pdf_bytes),
         "pdf_version": reader.pdf_header,
     }
+
+
+def compress_pdf(
+    source,
+    compression_level: str = "medium",
+    password: str = None,
+) -> dict:
+    """
+    Compress a PDF file by reducing image quality and removing redundant data.
+
+    Args:
+        source            : uploaded file object OR raw bytes
+        compression_level : 'low' | 'medium' | 'high' | 'extreme'
+        password          : PDF password if encrypted
+
+    Compression levels:
+        low     → light compression, best quality  (image DPI: 150, quality: 85)
+        medium  → balanced compression             (image DPI: 120, quality: 72)
+        high    → aggressive compression           (image DPI: 96,  quality: 60)
+        extreme → maximum compression, low quality (image DPI: 72,  quality: 40)
+
+    Returns:
+        {
+            'bytes'            : bytes,
+            'original_size'    : int,
+            'compressed_size'  : int,
+            'reduction_percent': float,
+            'compression_level': str,
+        }
+    """
+    import fitz  # pymupdf
+    from PIL import Image
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    original_size = len(pdf_bytes)
+
+    # ── Validate PDF ──────────────────────────────
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Compression level config ───────────────────
+    levels = {
+        "low": {"dpi": 150, "quality": 85, "deflate": 3},
+        "medium": {"dpi": 120, "quality": 72, "deflate": 6},
+        "high": {"dpi": 96, "quality": 60, "deflate": 7},
+        "extreme": {"dpi": 72, "quality": 40, "deflate": 9},
+    }
+
+    if compression_level not in levels:
+        raise ValueError(
+            f'Invalid compression_level: "{compression_level}". '
+            f"Must be one of: {list(levels.keys())}"
+        )
+
+    config = levels[compression_level]
+    dpi = config["dpi"]
+    quality = config["quality"]
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    if doc.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if not doc.authenticate(password):
+            raise ValueError("Wrong password.")
+
+    # ── Step 1: Compress images on each page ───────
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+
+        # Get all images on this page
+        image_list = page.get_images(full=True)
+
+        for img_info in image_list:
+            xref = img_info[0]  # image reference number
+            base_image = doc.extract_image(xref)
+
+            if not base_image:
+                continue
+
+            img_bytes = base_image["image"]
+            img_ext = base_image["ext"]
+
+            # Skip non-raster images (masks, etc.)
+            if img_ext not in ("jpeg", "jpg", "png", "bmp", "tiff"):
+                continue
+
+            try:
+                # ── Open image with PIL ───────────
+                pil_img = Image.open(io.BytesIO(img_bytes))
+
+                # Convert to RGB if needed
+                if pil_img.mode in ("RGBA", "P", "LA"):
+                    pil_img = pil_img.convert("RGB")
+                elif pil_img.mode == "L":
+                    pass  # keep grayscale as is
+
+                # ── Resize if DPI is too high ──────
+                orig_w, orig_h = pil_img.size
+                if orig_w > dpi * 8 or orig_h > dpi * 11:
+                    scale = min(dpi * 8 / orig_w, dpi * 11 / orig_h)
+                    new_w = max(1, int(orig_w * scale))
+                    new_h = max(1, int(orig_h * scale))
+                    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+
+                # ── Save as JPEG with compression ──
+                img_buffer = io.BytesIO()
+                pil_img.save(
+                    img_buffer,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                )
+                img_buffer.seek(0)
+                new_img_bytes = img_buffer.read()
+
+                # Only replace if new image is smaller
+                if len(new_img_bytes) < len(img_bytes):
+                    doc.update_stream(xref, new_img_bytes)
+
+            except Exception:
+                continue  # skip problematic images silently
+
+    # ── Step 2: Clean and compress PDF structure ───
+    buffer = io.BytesIO()
+    doc.save(
+        buffer,
+        garbage=4,  # remove unused objects (0-4, 4=most aggressive)
+        deflate=True,  # compress streams
+        deflate_images=True,  # compress images
+        deflate_fonts=True,  # compress fonts
+        clean=True,  # clean content streams
+        pretty=False,  # no pretty printing (saves space)
+        linear=False,  # no linearization (saves space)
+    )
+    doc.close()
+
+    buffer.seek(0)
+    compressed_bytes = buffer.read()
+    compressed_size = len(compressed_bytes)
+
+    # ── Calculate reduction ────────────────────────
+    reduction = (
+        (original_size - compressed_size) / original_size * 100
+        if original_size > 0
+        else 0
+    )
+
+    return {
+        "bytes": compressed_bytes,
+        "original_size": original_size,
+        "compressed_size": compressed_size,
+        "reduction_percent": round(reduction, 2),
+        "compression_level": compression_level,
+        "original_size_kb": round(original_size / 1024, 2),
+        "compressed_size_kb": round(compressed_size / 1024, 2),
+        "original_size_mb": round(original_size / (1024 * 1024), 2),
+        "compressed_size_mb": round(compressed_size / (1024 * 1024), 2),
+    }
+
+
+def pdf_to_png(
+    source,
+    dpi: int = 200,
+    pages: list = None,
+    password: str = None,
+) -> list[dict]:
+    """
+    Convert PDF (file or bytes) → list of PNG images (one per page).
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        dpi      : image resolution (default: 200)
+        pages    : list of page numbers to convert (1-based)
+                   None = convert all pages
+        password : PDF password if encrypted
+
+    Returns:
+        list of {
+            'page'    : int,
+            'bytes'   : bytes,
+            'width'   : int,
+            'height'  : int,
+            'filename': str,
+        }
+    """
+    import fitz  # pymupdf
+    from PIL import Image
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Validate PDF ──────────────────────────────
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    if doc.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if not doc.authenticate(password):
+            raise ValueError("Wrong password.")
+
+    total_pages = len(doc)
+
+    # ── Validate pages ────────────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"PDF has {total_pages} pages (1-{total_pages})."
+            )
+        pages_to_convert = pages
+    else:
+        pages_to_convert = list(range(1, total_pages + 1))
+
+    # ── Convert each page → PNG ───────────────────
+    zoom = dpi / 72  # pymupdf base DPI is 72
+    matrix = fitz.Matrix(zoom, zoom)
+    results = []
+
+    for page_num in pages_to_convert:
+        page = doc[page_num - 1]  # 0-based index
+
+        # ── Render page → pixmap ──────────────────
+        pixmap = page.get_pixmap(
+            matrix=matrix,
+            alpha=True,  # PNG supports transparency
+        )
+
+        # ── Pixmap → PIL Image → PNG bytes ────────
+        image = Image.frombytes(
+            "RGBA",
+            [pixmap.width, pixmap.height],
+            pixmap.samples,
+        )
+
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="PNG",
+            optimize=True,
+            compress_level=6,  # 0-9, 6 is balanced
+        )
+        buffer.seek(0)
+        png_bytes = buffer.read()
+
+        results.append(
+            {
+                "page": page_num,
+                "bytes": png_bytes,
+                "width": pixmap.width,
+                "height": pixmap.height,
+                "filename": f"page_{page_num}.png",
+                "size_kb": round(len(png_bytes) / 1024, 2),
+            }
+        )
+
+    doc.close()
+    return results

@@ -1092,3 +1092,248 @@ class PDFInfoView(APIView):
             return Response({"error": str(e)}, status=500)
 
         return Response(info)
+
+
+class CompressPDFView(APIView):
+    """
+    POST /api/pdf/compress/
+    Upload a PDF → returns compressed PDF.
+
+    Form fields:
+        file              : PDF file                         (required)
+        compression_level : low | medium | high | extreme   (default: medium)
+        password          : PDF password                     (optional)
+        output            : file | json                      (default: file)
+        filename          : output filename                  (optional)
+
+    output modes:
+        file → download compressed PDF directly
+        json → return compression stats + base64 PDF
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        compression_level = request.data.get("compression_level", "medium")
+        password = request.data.get("password", None)
+        output = request.data.get("output", "file")
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+
+        if compression_level not in ("low", "medium", "high", "extreme"):
+            return Response(
+                {"error": "compression_level must be: low, medium, high, or extreme."},
+                status=400,
+            )
+
+        if output not in ("file", "json"):
+            return Response(
+                {"error": "output must be: file or json."},
+                status=400,
+            )
+
+        # ── Output filename ───────────────────────
+        if not filename:
+            filename = file.name.replace(".pdf", f"_compressed_{compression_level}.pdf")
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+
+        # ── Compress ──────────────────────────────
+        try:
+            result = compress_pdf(
+                file,
+                compression_level=compression_level,
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output: JSON with stats + base64 ──────
+        if output == "json":
+            import base64
+
+            return Response(
+                {
+                    "compression_level": result["compression_level"],
+                    "original_size_kb": result["original_size_kb"],
+                    "compressed_size_kb": result["compressed_size_kb"],
+                    "original_size_mb": result["original_size_mb"],
+                    "compressed_size_mb": result["compressed_size_mb"],
+                    "reduction_percent": result["reduction_percent"],
+                    "filename": filename,
+                    "pdf_base64": base64.b64encode(result["bytes"]).decode("utf-8"),
+                }
+            )
+
+        # ── Output: file download (default) ───────
+        response = HttpResponse(
+            result["bytes"],
+            content_type="application/pdf",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = result["compressed_size"]
+        response["X-Original-Size-KB"] = result["original_size_kb"]
+        response["X-Compressed-Size-KB"] = result["compressed_size_kb"]
+        response["X-Reduction-Percent"] = result["reduction_percent"]
+        response["X-Compression-Level"] = result["compression_level"]
+        return response
+
+
+
+class PDFToPNGView(APIView):
+    """
+    POST /api/convert/pdf/png/
+    Upload a PDF file → returns PNG image(s).
+
+    Form fields:
+        file     : PDF file                         (required)
+        dpi      : image resolution 72-600          (default: 200)
+        pages    : comma-separated page numbers     (default: all)
+                   e.g. "1" or "1,3,5"
+        password : PDF password                     (optional)
+        output   : single | zip | base64            (default: zip)
+                   - single  → first (or specific) page as .png
+                   - zip     → all pages as .zip of .png files
+                   - base64  → JSON with base64 encoded images
+        filename : output filename                  (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        dpi = request.data.get("dpi", "200")
+        pages = request.data.get("pages", None)
+        password = request.data.get("password", None)
+        output = request.data.get("output", "zip")
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "Only .pdf files are accepted."}, status=400)
+
+        if output not in ("single", "zip", "base64"):
+            return Response(
+                {"error": "output must be: single, zip, or base64."},
+                status=400,
+            )
+
+        # ── Parse DPI ─────────────────────────────
+        try:
+            dpi = int(dpi)
+            if not (72 <= dpi <= 600):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "dpi must be an integer between 72 and 600."},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        parsed_pages = None
+        if pages:
+            try:
+                parsed_pages = [int(p.strip()) for p in pages.split(",") if p.strip()]
+            except ValueError:
+                return Response(
+                    {"error": 'pages must be comma-separated integers: e.g. "1,2,3"'},
+                    status=400,
+                )
+
+        # ── Base filename ─────────────────────────
+        base_name = file.name.replace(".pdf", "").replace(".PDF", "")
+
+        # ── Convert ───────────────────────────────
+        try:
+            png_pages = pdf_to_png(
+                file,
+                dpi=dpi,
+                pages=parsed_pages,
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        if not png_pages:
+            return Response({"error": "No pages found in PDF."}, status=400)
+
+        # ── Output: single PNG ─────────────────────
+        if output == "single":
+            first = png_pages[0]
+            out_name = filename or f'{base_name}_page_{first["page"]}.png'
+            if not out_name.endswith(".png"):
+                out_name += ".png"
+
+            response = HttpResponse(first["bytes"], content_type="image/png")
+            response["Content-Disposition"] = f'attachment; filename="{out_name}"'
+            response["Content-Length"] = len(first["bytes"])
+            response["X-Page"] = first["page"]
+            response["X-Width"] = first["width"]
+            response["X-Height"] = first["height"]
+            return response
+
+        # ── Output: ZIP of all PNGs ────────────────
+        if output == "zip":
+            import zipfile
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in png_pages:
+                    zf.writestr(
+                        f'{base_name}_page_{p["page"]}.png',
+                        p["bytes"],
+                    )
+            zip_buffer.seek(0)
+
+            out_name = filename or f"{base_name}_pages.zip"
+            if not out_name.endswith(".zip"):
+                out_name += ".zip"
+
+            response = HttpResponse(
+                zip_buffer.read(),
+                content_type="application/zip",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{out_name}"'
+            response["X-Total-Pages"] = len(png_pages)
+            return response
+
+        # ── Output: base64 JSON ────────────────────
+        if output == "base64":
+            import base64
+
+            data = [
+                {
+                    "page": p["page"],
+                    "filename": f'{base_name}_page_{p["page"]}.png',
+                    "width": p["width"],
+                    "height": p["height"],
+                    "size_kb": p["size_kb"],
+                    "base64": base64.b64encode(p["bytes"]).decode("utf-8"),
+                }
+                for p in png_pages
+            ]
+
+            return Response(
+                {
+                    "total_pages": len(data),
+                    "dpi": dpi,
+                    "format": "PNG",
+                    "pages": data,
+                }
+            )

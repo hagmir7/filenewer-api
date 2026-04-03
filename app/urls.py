@@ -23,5 +23,8 @@ urlpatterns = [
      path('tools/pdf-compress',             CompressPDFView.as_view(),     name='pdf-compress'),
      path('tools/pdf-to-png',          PDFToPNGView.as_view(),        name='pdf-to-png'),
     path("tools/pdf-info", PDFInfoView.as_view(), name="pdf-info"),
+    path('tools/pdf-rotate',               RotatePDFView.as_view(),       name='pdf-rotate'),   # ← ✅
+    path('tools/pdf-pages',                PDFPageInfoView.as_view(),     name='pdf-pages'),    # ← ✅
+     path('tools/pdf-watermark',            WatermarkPDFView.as_view(),    name='pdf-watermark'),  # ← add
     path("health/", HealthCheckView.as_view(), name="health-check"),
 ]

@@ -1780,3 +1780,342 @@ def pdf_to_png(
 
     doc.close()
     return results
+
+
+def rotate_pdf(
+    source,
+    rotation : int  = 90,
+    pages    : list = None,
+    password : str  = None,
+) -> tuple:
+    """
+    Rotate pages in a PDF.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        rotation : degrees to rotate (90, 180, 270, -90)
+        pages    : list of page numbers to rotate (1-based)
+                   None = rotate all pages
+        password : PDF password if encrypted
+
+    Returns:
+        (rotated_bytes, total_pages, rotated_count)
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, 'read'):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Validate PDF ──────────────────────────────
+    if not pdf_bytes.startswith(b'%PDF'):
+        raise ValueError('Invalid PDF file.')
+
+    # ── Normalize rotation ─────────────────────────
+    valid_rotations = [90, 180, 270, -90, -180, -270]
+    if rotation not in valid_rotations:
+        raise ValueError(
+            f'Invalid rotation: {rotation}. '
+            f'Must be one of: {valid_rotations}'
+        )
+    rotation = rotation % 360
+
+    # ── Read PDF ──────────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # ── Decrypt if needed ──────────────────────────
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError('PDF is encrypted. Provide a password.')
+        if reader.decrypt(password) == 0:
+            raise ValueError('Wrong password.')
+
+    total_pages = len(reader.pages)
+
+    # ── Validate page numbers ──────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f'Invalid page numbers: {invalid}. '
+                f'PDF has {total_pages} pages (1-{total_pages}).'
+            )
+        pages_to_rotate = set(pages)
+    else:
+        pages_to_rotate = set(range(1, total_pages + 1))
+
+    # ── Rotate + write ─────────────────────────────
+    writer = PdfWriter()
+
+    for i, page in enumerate(reader.pages, start=1):
+        if i in pages_to_rotate:
+            page.rotate(rotation)
+        writer.add_page(page)
+
+    # ── Copy metadata ──────────────────────────────
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+
+    return buffer.read(), total_pages, len(pages_to_rotate)
+
+
+def get_pdf_page_info(source, password: str = None) -> list:
+    """
+    Get rotation and dimension info for each page.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : PDF password if encrypted
+
+    Returns:
+        list of { page, width, height, rotation }
+    """
+    from pypdf import PdfReader
+
+    if hasattr(source, 'read'):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError('PDF is encrypted. Provide a password.')
+        if reader.decrypt(password) == 0:
+            raise ValueError('Wrong password.')
+
+    result = []
+    for i, page in enumerate(reader.pages, start=1):
+        result.append({
+            'page'    : i,
+            'width'   : float(page.mediabox.width),
+            'height'  : float(page.mediabox.height),
+            'rotation': page.rotation,
+        })
+
+    return result
+
+
+def watermark_pdf(
+    source,
+    watermark_text: str = "CONFIDENTIAL",
+    watermark_type: str = "text",
+    watermark_image: bytes = None,
+    opacity: float = 0.3,
+    font_size: int = 60,
+    color: str = "red",
+    angle: int = 45,
+    position: str = "center",
+    pages: list = None,
+    password: str = None,
+) -> bytes:
+    """
+    Add text or image watermark to a PDF.
+    Returns raw bytes of the watermarked PDF.
+    """
+    from pypdf import PdfReader, PdfWriter
+    from reportlab.lib import colors as rl_colors
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Validate ──────────────────────────────────
+    valid_positions = (
+        "center",
+        "top",
+        "bottom",
+        "top-left",
+        "top-right",
+        "bottom-left",
+        "bottom-right",
+    )
+    if position not in valid_positions:
+        raise ValueError(f"Invalid position. Must be one of: {valid_positions}")
+    if not (0.0 <= opacity <= 1.0):
+        raise ValueError("opacity must be between 0.0 and 1.0.")
+    if watermark_type not in ("text", "image"):
+        raise ValueError('watermark_type must be "text" or "image".')
+    if watermark_type == "image" and not watermark_image:
+        raise ValueError("watermark_image bytes are required for image watermark.")
+
+    # ── Color map ─────────────────────────────────
+    color_map = {
+        "red": rl_colors.red,
+        "blue": rl_colors.blue,
+        "grey": rl_colors.grey,
+        "gray": rl_colors.grey,
+        "black": rl_colors.black,
+        "green": rl_colors.green,
+        "yellow": rl_colors.yellow,
+        "white": rl_colors.white,
+    }
+    wm_color = color_map.get(color.lower(), rl_colors.red)
+
+    # ── Read PDF ──────────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if reader.decrypt(password) == 0:
+            raise ValueError("Wrong password.")
+
+    total_pages = len(reader.pages)
+
+    # ── Pages to watermark ────────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"PDF has {total_pages} pages (1-{total_pages})."
+            )
+        pages_to_watermark = set(pages)
+    else:
+        pages_to_watermark = set(range(1, total_pages + 1))
+
+    # ── Position calculator ────────────────────────
+    def get_position(pos, pw, ph):
+        padding = 60
+        return {
+            "center": (pw / 2, ph / 2),
+            "top": (pw / 2, ph - padding),
+            "bottom": (pw / 2, padding),
+            "top-left": (padding, ph - padding),
+            "top-right": (pw - padding, ph - padding),
+            "bottom-left": (padding, padding),
+            "bottom-right": (pw - padding, padding),
+        }.get(pos, (pw / 2, ph / 2))
+
+    # ── Build text watermark page ──────────────────
+    def make_text_watermark(pw, ph) -> bytes:
+        buf = io.BytesIO()
+        c = rl_canvas.Canvas(buf, pagesize=(pw, ph))
+
+        x, y = get_position(position, pw, ph)
+
+        c.saveState()
+        c.setFillColor(wm_color, alpha=opacity)
+        c.setFont("Helvetica-Bold", font_size)
+        c.translate(x, y)
+        c.rotate(angle)
+        c.drawCentredString(0, 0, watermark_text)
+        c.restoreState()
+
+        c.save()
+        buf.seek(0)
+        return buf.read()
+
+    # ── Build image watermark page ─────────────────
+    def make_image_watermark(pw, ph) -> bytes:
+        from PIL import Image as PILImage
+        from reportlab.lib.utils import ImageReader
+
+        buf = io.BytesIO()
+        c = rl_canvas.Canvas(buf, pagesize=(pw, ph))
+
+        # ── Open + convert image ───────────────────
+        pil_img = PILImage.open(io.BytesIO(watermark_image))
+
+        # Convert palette/RGBA → RGBA for consistent handling
+        if pil_img.mode == "P":
+            pil_img = pil_img.convert("RGBA")
+        if pil_img.mode not in ("RGB", "RGBA", "L"):
+            pil_img = pil_img.convert("RGBA")
+
+        # ── Apply opacity to image ─────────────────
+        if pil_img.mode == "RGBA":
+            r, g, b, a = pil_img.split()
+            # Scale alpha channel by opacity
+            a = a.point(lambda px: int(px * opacity))
+            pil_img = PILImage.merge("RGBA", (r, g, b, a))
+        else:
+            # For RGB images, convert to RGBA and apply opacity
+            pil_img = pil_img.convert("RGBA")
+            r, g, b, a = pil_img.split()
+            a = a.point(lambda px: int(px * opacity))
+            pil_img = PILImage.merge("RGBA", (r, g, b, a))
+
+        # ── Save processed image to buffer ─────────
+        img_buf = io.BytesIO()
+        pil_img.save(img_buf, format="PNG")
+        img_buf.seek(0)
+
+        # ── Scale image to fit page (max 40%) ──────
+        orig_w, orig_h = pil_img.size
+        max_w = pw * 0.4
+        max_h = ph * 0.4
+        scale = min(max_w / orig_w, max_h / orig_h)
+        draw_w = orig_w * scale
+        draw_h = orig_h * scale
+
+        # ── Get anchor position ────────────────────
+        x, y = get_position(position, pw, ph)
+
+        # ── Draw image ─────────────────────────────
+        c.saveState()
+        c.translate(x, y)
+        c.rotate(angle)
+
+        # Draw centered on anchor point
+        c.drawImage(
+            ImageReader(img_buf),
+            x=-draw_w / 2,
+            y=-draw_h / 2,
+            width=draw_w,
+            height=draw_h,
+            mask="auto",
+        )
+        c.restoreState()
+
+        c.save()
+        buf.seek(0)
+        return buf.read()
+
+    # ── Apply watermark to each page ──────────────
+    writer = PdfWriter()
+
+    for i, page in enumerate(reader.pages, start=1):
+        if i in pages_to_watermark:
+            pw = float(page.mediabox.width)
+            ph = float(page.mediabox.height)
+
+            try:
+                if watermark_type == "image":
+                    wm_bytes = make_image_watermark(pw, ph)
+                else:
+                    wm_bytes = make_text_watermark(pw, ph)
+
+                wm_page = PdfReader(io.BytesIO(wm_bytes)).pages[0]
+                page.merge_page(wm_page)
+
+            except Exception as e:
+                # If watermark fails on a page, keep original page
+                raise RuntimeError(f"Watermark failed on page {i}: {e}")
+
+        writer.add_page(page)
+
+    # ── Copy metadata ──────────────────────────────
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Serialize → always return bytes ───────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer.read()  # ← always bytes, never None

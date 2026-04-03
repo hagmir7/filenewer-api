@@ -1189,7 +1189,6 @@ class CompressPDFView(APIView):
         return response
 
 
-
 class PDFToPNGView(APIView):
     """
     POST /api/convert/pdf/png/
@@ -1337,3 +1336,482 @@ class PDFToPNGView(APIView):
                     "pages": data,
                 }
             )
+
+
+class RotatePDFView(APIView):
+    """
+    POST /api/pdf/rotate/
+    Upload a PDF → returns rotated PDF.
+
+    Form fields:
+        file     : PDF file                         (required)
+        rotation : 90 | 180 | 270 | -90            (default: 90)
+        pages    : comma-separated page numbers     (default: all)
+                   e.g. "1" or "1,3,5"
+        password : PDF password                     (optional)
+        filename : output filename                  (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        rotation = request.data.get("rotation", "90")
+        pages = request.data.get("pages", None)
+        password = request.data.get("password", None)
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response(
+                {"error": "Only .pdf files are accepted."},
+                status=400,
+            )
+
+        # ── Parse rotation ────────────────────────
+        try:
+            rotation = int(rotation)
+        except ValueError:
+            return Response(
+                {"error": "rotation must be an integer: 90, 180, 270, or -90."},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        parsed_pages = None
+        if pages:
+            try:
+                parsed_pages = [int(p.strip()) for p in pages.split(",") if p.strip()]
+                if not parsed_pages:
+                    parsed_pages = None
+            except ValueError:
+                return Response(
+                    {"error": 'pages must be comma-separated integers: e.g. "1,2,3"'},
+                    status=400,
+                )
+
+        # ── Output filename ───────────────────────
+        if not filename:
+            filename = file.name.replace(".pdf", "_rotated.pdf")
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+
+        # ── Rotate ────────────────────────────────
+        try:
+            rotated_bytes, total_pages, rotated_count = rotate_pdf(
+                file,
+                rotation=rotation,
+                pages=parsed_pages,
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return rotated PDF ─────────────────────
+        response = HttpResponse(rotated_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(rotated_bytes)
+        response["X-Total-Pages"] = total_pages
+        response["X-Rotated-Pages"] = rotated_count
+        response["X-Rotation-Degrees"] = rotation
+        return response
+
+
+class PDFPageInfoView(APIView):
+    """
+    POST /api/pdf/pages/
+    Upload a PDF → returns page dimensions and current rotation per page.
+
+    Form fields:
+        file     : PDF file     (required)
+        password : PDF password (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        password = request.data.get("password", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response(
+                {"error": "Only .pdf files are accepted."},
+                status=400,
+            )
+
+        # ── Get page info ─────────────────────────
+        try:
+            pages_info = get_pdf_page_info(file, password=password)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(
+            {
+                "total_pages": len(pages_info),
+                "pages": pages_info,
+            }
+        )
+
+
+class WatermarkPDFView(APIView):
+    """
+    POST /api/pdf/watermark/
+    Upload a PDF → returns watermarked PDF.
+
+    Form fields (text watermark):
+        file            : PDF file                              (required)
+        watermark_text  : watermark text                       (default: CONFIDENTIAL)
+        watermark_type  : text | image                         (default: text)
+        opacity         : 0.0 - 1.0                            (default: 0.3)
+        font_size       : text size                            (default: 60)
+        color           : red|blue|grey|black|green|yellow|white (default: red)
+        angle           : rotation angle                       (default: 45)
+        position        : center|top|bottom|                   (default: center)
+                          top-left|top-right|
+                          bottom-left|bottom-right
+        pages           : comma-separated page numbers         (default: all)
+        password        : PDF password                         (optional)
+        filename        : output filename                      (optional)
+
+    Form fields (image watermark):
+        file            : PDF file                             (required)
+        watermark_type  : image                                (required)
+        watermark_image : image file (png/jpg)                 (required)
+        opacity         : 0.0 - 1.0                            (default: 0.3)
+        angle           : rotation angle                       (default: 45)
+        position        : position                             (default: center)
+        pages           : comma-separated page numbers         (default: all)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        watermark_image = request.FILES.get("watermark_image", None)
+        watermark_text = request.data.get("watermark_text", "CONFIDENTIAL")
+        watermark_type = request.data.get("watermark_type", "text")
+        opacity = request.data.get("opacity", "0.3")
+        font_size = request.data.get("font_size", "60")
+        color = request.data.get("color", "red")
+        angle = request.data.get("angle", "45")
+        position = request.data.get("position", "center")
+        pages = request.data.get("pages", None)
+        password = request.data.get("password", None)
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response(
+                {"error": "Only .pdf files are accepted."},
+                status=400,
+            )
+
+        if watermark_type == "image" and not watermark_image:
+            return Response(
+                {
+                    "error": 'watermark_image is required when watermark_type is "image".'
+                },
+                status=400,
+            )
+
+        # ── Parse opacity ─────────────────────────
+        try:
+            opacity = float(opacity)
+            if not (0.0 <= opacity <= 1.0):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "opacity must be a float between 0.0 and 1.0."},
+                status=400,
+            )
+
+        # ── Parse font_size ───────────────────────
+        try:
+            font_size = int(font_size)
+            if not (8 <= font_size <= 200):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "font_size must be an integer between 8 and 200."},
+                status=400,
+            )
+
+        # ── Parse angle ───────────────────────────
+        try:
+            angle = int(angle)
+        except ValueError:
+            return Response(
+                {"error": "angle must be an integer (e.g. 0, 45, 90)."},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        parsed_pages = None
+        if pages:
+            try:
+                parsed_pages = [int(p.strip()) for p in pages.split(",") if p.strip()]
+            except ValueError:
+                return Response(
+                    {"error": 'pages must be comma-separated integers: e.g. "1,2,3"'},
+                    status=400,
+                )
+
+        # ── Read watermark image bytes ─────────────
+        wm_image_bytes = None
+        if watermark_image:
+            wm_image_bytes = watermark_image.read()
+
+        # ── Output filename ───────────────────────
+        if not filename:
+            filename = file.name.replace(".pdf", "_watermarked.pdf")
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+
+        # ── Apply watermark ────────────────────────
+        try:
+            result_bytes = watermark_pdf(
+                file,
+                watermark_text=watermark_text,
+                watermark_type=watermark_type,
+                watermark_image=wm_image_bytes,
+                opacity=opacity,
+                font_size=font_size,
+                color=color,
+                angle=angle,
+                position=position,
+                pages=parsed_pages,
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return watermarked PDF ─────────────────
+        response = HttpResponse(result_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Content-Length"] = len(result_bytes)
+        return response
+
+class WatermarkPDFView(APIView):
+    """
+    POST /api/pdf/watermark/
+    Upload a PDF → returns watermarked PDF.
+
+    Form fields (text watermark):
+        file            : PDF file                                (required)
+        watermark_text  : watermark text                         (default: CONFIDENTIAL)
+        watermark_type  : text | image                           (default: text)
+        opacity         : 0.0 - 1.0                              (default: 0.3)
+        font_size       : text size                              (default: 60)
+        color           : red|blue|grey|black|green|yellow|white (default: red)
+        angle           : rotation angle                         (default: 45)
+        position        : center|top|bottom|                     (default: center)
+                          top-left|top-right|
+                          bottom-left|bottom-right
+        pages           : comma-separated page numbers           (default: all)
+        password        : PDF password                           (optional)
+        filename        : output filename                        (optional)
+
+    Form fields (image watermark):
+        file            : PDF file                               (required)
+        watermark_type  : image                                  (required)
+        watermark_image : image file png/jpg                     (required)
+        opacity         : 0.0 - 1.0                              (default: 0.3)
+        angle           : rotation angle                         (default: 45)
+        position        : position                               (default: center)
+        pages           : comma-separated page numbers           (default: all)
+        password        : PDF password                           (optional)
+        filename        : output filename                        (optional)
+    """
+    parser_classes     = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file             = request.FILES.get('file')
+        watermark_image  = request.FILES.get('watermark_image', None)
+        watermark_text   = request.data.get('watermark_text',  'CONFIDENTIAL')
+        watermark_type   = request.data.get('watermark_type',  'text')
+        opacity          = request.data.get('opacity',         '0.3')
+        font_size        = request.data.get('font_size',       '60')
+        color            = request.data.get('color',           'red')
+        angle            = request.data.get('angle',           '45')
+        position         = request.data.get('position',        'center')
+        pages            = request.data.get('pages',           None)
+        password         = request.data.get('password',        None)
+        filename         = request.data.get('filename',        None)
+
+        # ── Validate file ──────────────────────────
+        if not file:
+            return Response(
+                {'error': 'No file provided.'},
+                status=400,
+            )
+
+        if not file.name.lower().endswith('.pdf'):
+            return Response(
+                {'error': 'Only .pdf files are accepted.'},
+                status=400,
+            )
+
+        # ── Validate watermark type ────────────────
+        if watermark_type not in ('text', 'image'):
+            return Response(
+                {'error': 'watermark_type must be "text" or "image".'},
+                status=400,
+            )
+
+        if watermark_type == 'image' and not watermark_image:
+            return Response(
+                {'error': 'watermark_image file is required when watermark_type is "image".'},
+                status=400,
+            )
+
+        if watermark_type == 'text' and not watermark_text.strip():
+            return Response(
+                {'error': 'watermark_text is required when watermark_type is "text".'},
+                status=400,
+            )
+
+        # ── Validate opacity ───────────────────────
+        try:
+            opacity = float(opacity)
+            if not (0.0 <= opacity <= 1.0):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {'error': 'opacity must be a float between 0.0 and 1.0.'},
+                status=400,
+            )
+
+        # ── Validate font_size ─────────────────────
+        try:
+            font_size = int(font_size)
+            if not (8 <= font_size <= 200):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {'error': 'font_size must be an integer between 8 and 200.'},
+                status=400,
+            )
+
+        # ── Validate angle ─────────────────────────
+        try:
+            angle = int(angle)
+        except ValueError:
+            return Response(
+                {'error': 'angle must be an integer e.g. 0, 45, 90.'},
+                status=400,
+            )
+
+        # ── Validate color ─────────────────────────
+        valid_colors = ('red', 'blue', 'grey', 'gray', 'black', 'green', 'yellow', 'white')
+        if color.lower() not in valid_colors:
+            return Response(
+                {'error': f'color must be one of: {", ".join(valid_colors)}'},
+                status=400,
+            )
+
+        # ── Validate position ──────────────────────
+        valid_positions = (
+            'center', 'top', 'bottom',
+            'top-left', 'top-right',
+            'bottom-left', 'bottom-right',
+        )
+        if position not in valid_positions:
+            return Response(
+                {'error': f'position must be one of: {", ".join(valid_positions)}'},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        parsed_pages = None
+        if pages:
+            try:
+                parsed_pages = [
+                    int(p.strip())
+                    for p in pages.split(',')
+                    if p.strip()
+                ]
+                if not parsed_pages:
+                    parsed_pages = None
+            except ValueError:
+                return Response(
+                    {'error': 'pages must be comma-separated integers e.g. "1,2,3"'},
+                    status=400,
+                )
+
+        # ── Read watermark image bytes ─────────────
+        wm_image_bytes = None
+        if watermark_image:
+            try:
+                wm_image_bytes = watermark_image.read()
+                if not wm_image_bytes:
+                    return Response(
+                        {'error': 'watermark_image file is empty.'},
+                        status=400,
+                    )
+            except Exception as e:
+                return Response(
+                    {'error': f'Failed to read watermark image: {e}'},
+                    status=400,
+                )
+
+        # ── Output filename ───────────────────────
+        if not filename:
+            filename = file.name.replace('.pdf', '_watermarked.pdf')
+            filename = filename.replace('.PDF', '_watermarked.pdf')
+        if not filename.endswith('.pdf'):
+            filename += '.pdf'
+
+        # ── Apply watermark ────────────────────────
+        try:
+            result_bytes = watermark_pdf(
+                source          = file,
+                watermark_text  = watermark_text,
+                watermark_type  = watermark_type,
+                watermark_image = wm_image_bytes,
+                opacity         = opacity,
+                font_size       = font_size,
+                color           = color,
+                angle           = angle,
+                position        = position,
+                pages           = parsed_pages,
+                password        = password,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except RuntimeError as e:
+            return Response({'error': str(e)}, status=500)
+        except Exception as e:
+            return Response({'error': f'Unexpected error: {e}'}, status=500)
+
+        # ── Safety check ───────────────────────────
+        if not result_bytes:
+            return Response(
+                {'error': 'Watermark failed — no output generated.'},
+                status=500,
+            )
+
+        # ── Return watermarked PDF ─────────────────
+        response = HttpResponse(result_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length']       = len(result_bytes)
+        return response

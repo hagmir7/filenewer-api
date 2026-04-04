@@ -36,6 +36,9 @@ urlpatterns = [
     path('tools/base64-encode-file',  Base64EncodeFileView.as_view(),  name='base64-encode-file'),
     path('tools/base64-decode',       Base64DecodeView.as_view(),      name='base64-decode'),
     path('tools/base64-validate',     Base64ValidateView.as_view(),    name='base64-validate'),
+    path('tools/uuid-generate',       UUIDGeneratorView.as_view(),     name='uuid-generate'),
+    path('tools/uuid-validate',       UUIDValidateView.as_view(),      name='uuid-validate'),
+    path('tools/uuid-bulk',           UUIDBulkView.as_view(),          name='uuid-bulk'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

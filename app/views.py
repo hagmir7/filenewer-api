@@ -2514,3 +2514,186 @@ class Base64ValidateView(APIView):
             return Response({"error": str(e)}, status=500)
 
         return Response(result)
+
+
+class UUIDGeneratorView(APIView):
+    """
+    POST /api/tools/uuid/generate/
+    Generate UUID(s) with full options.
+
+    JSON body:
+        {
+            "version"  : 4,
+            "count"    : 1,
+            "uppercase": false,
+            "hyphens"  : true,
+            "braces"   : false,
+            "prefix"   : "",
+            "suffix"   : "",
+            "namespace": "dns",
+            "name"     : "example.com",
+            "seed"     : null
+        }
+    """
+
+    parser_classes = [JSONParser, MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        version = request.data.get("version", 4)
+        count = request.data.get("count", 1)
+        uppercase = request.data.get("uppercase", False)
+        hyphens = request.data.get("hyphens", True)
+        braces = request.data.get("braces", False)
+        prefix = request.data.get("prefix", "")
+        suffix = request.data.get("suffix", "")
+        namespace = request.data.get("namespace", None)
+        name = request.data.get("name", None)
+        seed = request.data.get("seed", None)
+
+        # ── Parse + Validate ──────────────────────
+        try:
+            version = int(version)
+            count = int(count)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "version and count must be integers."},
+                status=400,
+            )
+
+        if isinstance(uppercase, str):
+            uppercase = uppercase.lower() == "true"
+        if isinstance(hyphens, str):
+            hyphens = hyphens.lower() == "true"
+        if isinstance(braces, str):
+            braces = braces.lower() == "true"
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "seed must be an integer."},
+                    status=400,
+                )
+
+        # ── Generate ──────────────────────────────
+        try:
+            result = generate_uuid(
+                version=version,
+                count=count,
+                uppercase=uppercase,
+                hyphens=hyphens,
+                braces=braces,
+                prefix=str(prefix),
+                suffix=str(suffix),
+                namespace=namespace,
+                name=name,
+                seed=seed,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class UUIDValidateView(APIView):
+    """
+    POST /api/tools/uuid/validate/
+    Validate a UUID and return its details.
+
+    JSON body:
+        {
+            "uuid": "550e8400-e29b-41d4-a716-446655440000"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        value = request.data.get("uuid")
+
+        if not value:
+            return Response(
+                {"error": '"uuid" field is required.'},
+                status=400,
+            )
+
+        try:
+            result = validate_uuid(str(value))
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class UUIDBulkView(APIView):
+    """
+    POST /api/tools/uuid/bulk/
+    Generate bulk UUIDs in multiple export formats.
+
+    JSON body:
+        {
+            "version": 4,
+            "count"  : 10,
+            "format" : "standard | csv | json | sql | array"
+        }
+    """
+
+    parser_classes = [JSONParser, MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        version = request.data.get("version", 4)
+        count = request.data.get("count", 10)
+        format = request.data.get("format", "standard")
+        output = request.data.get("output", "json")
+
+        try:
+            version = int(version)
+            count = int(count)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "version and count must be integers."},
+                status=400,
+            )
+
+        if format not in ("standard", "csv", "json", "sql", "array"):
+            return Response(
+                {"error": "format must be: standard, csv, json, sql, or array."},
+                status=400,
+            )
+
+        try:
+            result = bulk_generate_uuids(
+                version=version,
+                count=count,
+                format=format,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            ext_map = {
+                "csv": ("text/csv", ".csv"),
+                "json": ("application/json", ".json"),
+                "sql": ("text/plain", ".sql"),
+                "standard": ("text/plain", ".txt"),
+                "array": ("application/json", ".json"),
+            }
+            content_type, ext = ext_map.get(format, ("text/plain", ".txt"))
+            response = HttpResponse(
+                result["export"],
+                content_type=content_type,
+            )
+            response["Content-Disposition"] = (
+                f'attachment; filename="uuids_{count}{ext}"'
+            )
+            return response
+
+        return Response(result)

@@ -2027,32 +2027,6 @@ class JSONTextFormatterView(APIView):
             }
         )
 
-
-from .services import (
-    csv_to_sql,
-    csv_to_json,
-    json_to_csv,
-    excel_to_csv,
-    json_to_excel,
-    json_to_excel_multisheets,
-    csv_to_excel,
-    csv_to_excel_multisheets,
-    pdf_to_excel,
-    pdf_to_jpg,
-    pdf_to_png,
-    word_to_pdf,
-    encrypt_pdf,
-    decrypt_pdf,
-    get_pdf_info,
-    rotate_pdf,
-    get_pdf_page_info,
-    compress_pdf,
-    watermark_pdf,
-    format_json,
-    ocr_pdf,  # ← add
-)
-
-
 class OCRPDFView(APIView):
     """
     POST /api/pdf/ocr/
@@ -2181,5 +2155,127 @@ class OCRPDFView(APIView):
                 "char_count": result["char_count"],
                 "language": result["language"],
                 "dpi": result["dpi"],
+            }
+        )
+
+
+
+class TimestampConverterView(APIView):
+    """
+    POST /api/tools/timestamp/
+    Convert a single timestamp to multiple formats.
+
+    JSON body:
+        {
+            "value"      : "1704067200",
+            "from_tz"    : "UTC",
+            "to_tz"      : "Asia/Riyadh",
+            "from_format": null,
+            "to_format"  : "%d/%m/%Y"
+        }
+
+    value accepts:
+        - Unix seconds  : "1704067200"
+        - Unix ms       : "1704067200000"
+        - ISO 8601      : "2024-01-01T00:00:00Z"
+        - Human         : "2024-01-01 12:00:00"
+        - Date only     : "2024-01-01"
+        - Relative      : "now" | "today" | "yesterday" | "tomorrow"
+    """
+
+    parser_classes = [JSONParser, MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        value = request.data.get("value")
+        from_tz = request.data.get("from_tz", "UTC")
+        to_tz = request.data.get("to_tz", "UTC")
+        from_format = request.data.get("from_format", None)
+        to_format = request.data.get("to_format", None)
+
+        # ── Validate ──────────────────────────────
+        if value is None:
+            return Response(
+                {"error": '"value" field is required.'},
+                status=400,
+            )
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = convert_timestamp(
+                str(value),
+                from_tz=from_tz,
+                to_tz=to_tz,
+                from_format=from_format,
+                to_format=to_format,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class TimestampBatchView(APIView):
+    """
+    POST /api/tools/timestamp/batch/
+    Convert multiple timestamps at once.
+
+    JSON body:
+        {
+            "values"   : ["1704067200", "1704153600", "now"],
+            "from_tz"  : "UTC",
+            "to_tz"    : "Asia/Riyadh",
+            "to_format": "%Y-%m-%d %H:%M:%S"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        values = request.data.get("values")
+        from_tz = request.data.get("from_tz", "UTC")
+        to_tz = request.data.get("to_tz", "UTC")
+        to_format = request.data.get("to_format", None)
+
+        # ── Validate ──────────────────────────────
+        if not values:
+            return Response(
+                {"error": '"values" list is required.'},
+                status=400,
+            )
+        if not isinstance(values, list):
+            return Response(
+                {"error": '"values" must be a list.'},
+                status=400,
+            )
+        if len(values) > 100:
+            return Response(
+                {"error": "Maximum 100 timestamps per batch."},
+                status=400,
+            )
+
+        # ── Convert ───────────────────────────────
+        try:
+            results = batch_convert_timestamps(
+                values,
+                from_tz=from_tz,
+                to_tz=to_tz,
+                to_format=to_format,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        success = sum(1 for r in results if r.get("success"))
+        failed = len(results) - success
+
+        return Response(
+            {
+                "total": len(results),
+                "success": success,
+                "failed": failed,
+                "results": results,
             }
         )

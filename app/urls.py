@@ -29,6 +29,8 @@ urlpatterns = [
     path('tools/format-json-file',         JSONFileFormatterView.as_view(), name='json-file-formatter'),
     path('tools/format-json-text',         JSONTextFormatterView.as_view(), name='json-text-formatter'),
     path('tools/ocr-pdf',             OCRPDFView.as_view(),       name='pdf-compress'),
+    path('tools/timestamp',          TimestampConverterView.as_view(),name='timestamp-converter'),
+    path('tools/timestamp/batch',    TimestampBatchView.as_view(),    name='timestamp-batch'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

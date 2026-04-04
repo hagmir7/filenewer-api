@@ -1817,7 +1817,6 @@ class WatermarkPDFView(APIView):
         return response
 
 
-
 class JSONFileFormatterView(APIView):
     """
     POST /api/format/json/file/
@@ -2025,5 +2024,162 @@ class JSONTextFormatterView(APIView):
                 "minified": result["minified"],
                 "sorted_keys": result["sorted_keys"],
                 "indent": result["indent"],
+            }
+        )
+
+
+from .services import (
+    csv_to_sql,
+    csv_to_json,
+    json_to_csv,
+    excel_to_csv,
+    json_to_excel,
+    json_to_excel_multisheets,
+    csv_to_excel,
+    csv_to_excel_multisheets,
+    pdf_to_excel,
+    pdf_to_jpg,
+    pdf_to_png,
+    word_to_pdf,
+    encrypt_pdf,
+    decrypt_pdf,
+    get_pdf_info,
+    rotate_pdf,
+    get_pdf_page_info,
+    compress_pdf,
+    watermark_pdf,
+    format_json,
+    ocr_pdf,  # ← add
+)
+
+
+class OCRPDFView(APIView):
+    """
+    POST /api/pdf/ocr/
+    Upload a PDF → extracts text using OCR.
+
+    Form fields:
+        file          : PDF file                          (required)
+        language      : tesseract language code          (default: eng)
+                        eng | ara | eng+ara | fra | deu
+                        spa | chi_sim | rus | jpn | por
+        dpi           : render resolution 150-600        (default: 300)
+        pages         : comma-separated page numbers     (default: all)
+        password      : PDF password                     (optional)
+        output        : json | text | file               (default: json)
+                        json → structured JSON response
+                        text → plain text response
+                        file → download .txt file
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        language = request.data.get("language", "eng")
+        dpi = request.data.get("dpi", "300")
+        pages = request.data.get("pages", None)
+        password = request.data.get("password", None)
+        output = request.data.get("output", "json")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response(
+                {"error": "Only .pdf files are accepted."},
+                status=400,
+            )
+
+        if output not in ("json", "text", "file"):
+            return Response(
+                {"error": "output must be: json, text, or file."},
+                status=400,
+            )
+
+        # ── Validate DPI ──────────────────────────
+        try:
+            dpi = int(dpi)
+            if not (72 <= dpi <= 600):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "dpi must be an integer between 72 and 600."},
+                status=400,
+            )
+
+        # ── Validate language ─────────────────────
+        if not language.strip():
+            return Response(
+                {"error": "language is required."},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        parsed_pages = None
+        if pages:
+            try:
+                parsed_pages = [int(p.strip()) for p in pages.split(",") if p.strip()]
+            except ValueError:
+                return Response(
+                    {"error": 'pages must be comma-separated integers: e.g. "1,2,3"'},
+                    status=400,
+                )
+
+        # ── Run OCR ───────────────────────────────
+        try:
+            result = ocr_pdf(
+                file,
+                language=language,
+                dpi=dpi,
+                pages=parsed_pages,
+                password=password,
+            )
+        except RuntimeError as e:
+            return Response({"error": str(e)}, status=503)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        base_name = file.name.replace(".pdf", "").replace(".PDF", "")
+
+        # ── Output: plain text response ───────────
+        if output == "text":
+            return Response(
+                {
+                    "text": result["full_text"],
+                    "total_pages": result["total_pages"],
+                    "word_count": result["word_count"],
+                    "char_count": result["char_count"],
+                    "language": result["language"],
+                    "dpi": result["dpi"],
+                }
+            )
+
+        # ── Output: download .txt file ────────────
+        if output == "file":
+            response = HttpResponse(
+                result["full_text"],
+                content_type="text/plain; charset=utf-8",
+            )
+            response["Content-Disposition"] = (
+                f'attachment; filename="{base_name}_ocr.txt"'
+            )
+            response["Content-Length"] = len(result["full_text"].encode("utf-8"))
+            return response
+
+        # ── Output: full JSON (default) ────────────
+        return Response(
+            {
+                "full_text": result["full_text"],
+                "pages": result["pages"],
+                "total_pages": result["total_pages"],
+                "word_count": result["word_count"],
+                "char_count": result["char_count"],
+                "language": result["language"],
+                "dpi": result["dpi"],
             }
         )

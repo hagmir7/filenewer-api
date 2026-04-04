@@ -31,6 +31,11 @@ urlpatterns = [
     path('tools/ocr-pdf',             OCRPDFView.as_view(),       name='pdf-compress'),
     path('tools/timestamp',          TimestampConverterView.as_view(),name='timestamp-converter'),
     path('tools/timestamp/batch',    TimestampBatchView.as_view(),    name='timestamp-batch'),
+
+    path('tools/base64-encode-text',  Base64EncodeTextView.as_view(),  name='base64-encode-text'),
+    path('tools/base64-encode-file',  Base64EncodeFileView.as_view(),  name='base64-encode-file'),
+    path('tools/base64-decode',       Base64DecodeView.as_view(),      name='base64-decode'),
+    path('tools/base64-validate',     Base64ValidateView.as_view(),    name='base64-validate'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

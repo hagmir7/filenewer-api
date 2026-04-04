@@ -2159,7 +2159,6 @@ class OCRPDFView(APIView):
         )
 
 
-
 class TimestampConverterView(APIView):
     """
     POST /api/tools/timestamp/
@@ -2279,3 +2278,239 @@ class TimestampBatchView(APIView):
                 "results": results,
             }
         )
+
+
+class Base64EncodeTextView(APIView):
+    """
+    POST /api/tools/base64/encode/text/
+    Encode raw text → Base64.
+
+    JSON body:
+        {
+            "text"      : "Hello, World!",
+            "encoding"  : "standard",
+            "chunk_size": 0
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        text = request.data.get("text")
+        encoding = request.data.get("encoding", "standard")
+        chunk_size = request.data.get("chunk_size", 0)
+
+        # ── Validate ──────────────────────────────
+        if text is None:
+            return Response(
+                {"error": '"text" field is required.'},
+                status=400,
+            )
+        if encoding not in ("standard", "url_safe", "mime"):
+            return Response(
+                {"error": "encoding must be: standard, url_safe, or mime."},
+                status=400,
+            )
+        try:
+            chunk_size = int(chunk_size)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "chunk_size must be an integer."},
+                status=400,
+            )
+
+        # ── Encode ────────────────────────────────
+        try:
+            result = base64_encode(
+                str(text),
+                encoding=encoding,
+                chunk_size=chunk_size,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(
+            {
+                "encoded": result["encoded"],
+                "encoding": result["encoding"],
+                "original_size_kb": result["original_size_kb"],
+                "encoded_size_kb": result["encoded_size_kb"],
+                "overhead_percent": result["overhead_percent"],
+            }
+        )
+
+
+class Base64EncodeFileView(APIView):
+    """
+    POST /api/tools/base64/encode/file/
+    Encode file → Base64.
+
+    Form fields:
+        file       : any file                        (required)
+        encoding   : standard | url_safe | mime      (default: standard)
+        chunk_size : split output every N chars      (default: 0)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        encoding = request.data.get("encoding", "standard")
+        chunk_size = request.data.get("chunk_size", "0")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if encoding not in ("standard", "url_safe", "mime"):
+            return Response(
+                {"error": "encoding must be: standard, url_safe, or mime."},
+                status=400,
+            )
+        try:
+            chunk_size = int(chunk_size)
+        except ValueError:
+            return Response(
+                {"error": "chunk_size must be an integer."},
+                status=400,
+            )
+
+        # ── Encode ────────────────────────────────
+        try:
+            result = base64_encode(
+                file,
+                encoding=encoding,
+                chunk_size=chunk_size,
+                filename=file.name,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(
+            {
+                "encoded": result["encoded"],
+                "encoding": result["encoding"],
+                "filename": result["filename"],
+                "mime_type": result["mime_type"],
+                "data_uri": result["data_uri"],
+                "original_size_kb": result["original_size_kb"],
+                "encoded_size_kb": result["encoded_size_kb"],
+                "overhead_percent": result["overhead_percent"],
+            }
+        )
+
+
+class Base64DecodeView(APIView):
+    """
+    POST /api/tools/base64/decode/
+    Decode Base64 → text or file download.
+
+    JSON body:
+        {
+            "text"         : "SGVsbG8sIFdvcmxkIQ==",
+            "encoding"     : "standard",
+            "as_text"      : true,
+            "text_encoding": "utf-8",
+            "output"       : "json | file"
+        }
+    """
+
+    parser_classes = [JSONParser, MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        text = request.data.get("text")
+        encoding = request.data.get("encoding", "standard")
+        as_text = request.data.get("as_text", True)
+        text_encoding = request.data.get("text_encoding", "utf-8")
+        output = request.data.get("output", "json")
+        filename = request.data.get("filename", "decoded_file")
+
+        # ── Validate ──────────────────────────────
+        if not text:
+            return Response(
+                {"error": '"text" field is required.'},
+                status=400,
+            )
+        if encoding not in ("standard", "url_safe"):
+            return Response(
+                {"error": "encoding must be: standard or url_safe."},
+                status=400,
+            )
+        if output not in ("json", "file"):
+            return Response(
+                {"error": "output must be: json or file."},
+                status=400,
+            )
+        if isinstance(as_text, str):
+            as_text = as_text.lower() == "true"
+
+        # ── Decode ────────────────────────────────
+        try:
+            result = base64_decode(
+                text,
+                encoding=encoding,
+                as_text=as_text,
+                text_encoding=text_encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["decoded_bytes"],
+                content_type="application/octet-stream",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            response["Content-Length"] = result["decoded_size"]
+            return response
+
+        # ── Return JSON ───────────────────────────
+        return Response(
+            {
+                "decoded_text": result["decoded_text"],
+                "is_text": result["is_text"],
+                "encoding": result["encoding"],
+                "original_size_kb": result["original_size_kb"],
+                "decoded_size_kb": result["decoded_size_kb"],
+                "text_encoding": result["text_encoding"],
+            }
+        )
+
+
+class Base64ValidateView(APIView):
+    """
+    POST /api/tools/base64/validate/
+    Validate whether a string is valid Base64.
+
+    JSON body:
+        {
+            "text": "SGVsbG8sIFdvcmxkIQ=="
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        text = request.data.get("text")
+
+        if not text:
+            return Response(
+                {"error": '"text" field is required.'},
+                status=400,
+            )
+
+        try:
+            result = base64_validate(str(text))
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)

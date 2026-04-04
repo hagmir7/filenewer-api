@@ -1815,3 +1815,215 @@ class WatermarkPDFView(APIView):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         response['Content-Length']       = len(result_bytes)
         return response
+
+
+
+class JSONFileFormatterView(APIView):
+    """
+    POST /api/format/json/file/
+    Upload a .json file → returns formatted JSON.
+
+    Form fields:
+        file         : JSON file              (required)
+        indent       : spaces for indent      (default: 4)
+        sort_keys    : true | false           (default: false)
+        minify       : true | false           (default: false)
+        ensure_ascii : true | false           (default: false)
+        output       : text | file            (default: text)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        indent = request.data.get("indent", "4")
+        sort_keys = request.data.get("sort_keys", "false").lower() == "true"
+        minify = request.data.get("minify", "false").lower() == "true"
+        ensure_ascii = request.data.get("ensure_ascii", "false").lower() == "true"
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response({"error": "No file provided."}, status=400)
+        if not file.name.lower().endswith(".json"):
+            return Response({"error": "Only .json files are accepted."}, status=400)
+        if output not in ("text", "file"):
+            return Response({"error": "output must be text or file."}, status=400)
+
+        # ── Parse indent ──────────────────────────
+        try:
+            indent = int(indent)
+            if not (0 <= indent <= 8):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "indent must be an integer between 0 and 8."},
+                status=400,
+            )
+
+        # ── Format ────────────────────────────────
+        try:
+            result = format_json(
+                file,
+                indent=indent,
+                sort_keys=sort_keys,
+                minify=minify,
+                ensure_ascii=ensure_ascii,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Handle invalid JSON ────────────────────
+        if not result["is_valid"]:
+            return Response(
+                {
+                    "is_valid": False,
+                    "error": result.get("error"),
+                    "error_line": result.get("error_line"),
+                    "error_column": result.get("error_column"),
+                    "error_position": result.get("error_position"),
+                    "size_original": result.get("size_original"),
+                },
+                status=422,
+            )
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["formatted"],
+                content_type="application/json",
+            )
+            filename = file.name.replace(".json", "_formatted.json")
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        # ── Return JSON response ───────────────────
+        return Response(
+            {
+                "is_valid": result["is_valid"],
+                "formatted": result["formatted"],
+                "type": result["type"],
+                "depth": result["depth"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "size_original_kb": result["size_original_kb"],
+                "size_formatted_kb": result["size_formatted_kb"],
+                "minified": result["minified"],
+                "sorted_keys": result["sorted_keys"],
+                "indent": result["indent"],
+            }
+        )
+
+
+class JSONTextFormatterView(APIView):
+    """
+    POST /api/format/json/text/
+    Send raw JSON string → returns formatted JSON.
+
+    JSON body:
+        {
+            "json"        : "{...}",
+            "indent"      : 4,
+            "sort_keys"   : false,
+            "minify"      : false,
+            "ensure_ascii": false,
+            "output"      : "text"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        json_input = request.data.get("json")
+        indent = request.data.get("indent", 4)
+        sort_keys = request.data.get("sort_keys", False)
+        minify = request.data.get("minify", False)
+        ensure_ascii = request.data.get("ensure_ascii", False)
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if json_input is None:
+            return Response({"error": '"json" field is required.'}, status=400)
+
+        # Accept object/array directly or as string
+        if isinstance(json_input, (dict, list)):
+            import json as _json
+
+            json_input = _json.dumps(json_input)
+
+        if not isinstance(json_input, str):
+            return Response(
+                {"error": '"json" must be a string, object, or array.'},
+                status=400,
+            )
+
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be text or file."},
+                status=400,
+            )
+
+        # ── Validate indent ───────────────────────
+        try:
+            indent = int(indent)
+            if not (0 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 0 and 8."},
+                status=400,
+            )
+
+        # ── Format ────────────────────────────────
+        try:
+            result = format_json(
+                json_input,
+                indent=indent,
+                sort_keys=bool(sort_keys),
+                minify=bool(minify),
+                ensure_ascii=bool(ensure_ascii),
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Handle invalid JSON ────────────────────
+        if not result["is_valid"]:
+            return Response(
+                {
+                    "is_valid": False,
+                    "error": result.get("error"),
+                    "error_line": result.get("error_line"),
+                    "error_column": result.get("error_column"),
+                    "error_position": result.get("error_position"),
+                    "size_original": result.get("size_original"),
+                },
+                status=422,
+            )
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["formatted"],
+                content_type="application/json",
+            )
+            response["Content-Disposition"] = 'attachment; filename="formatted.json"'
+            return response
+
+        # ── Return JSON response ───────────────────
+        return Response(
+            {
+                "is_valid": result["is_valid"],
+                "formatted": result["formatted"],
+                "type": result["type"],
+                "depth": result["depth"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "size_original_kb": result["size_original_kb"],
+                "size_formatted_kb": result["size_formatted_kb"],
+                "minified": result["minified"],
+                "sorted_keys": result["sorted_keys"],
+                "indent": result["indent"],
+            }
+        )

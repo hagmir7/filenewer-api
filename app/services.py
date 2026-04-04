@@ -2119,3 +2119,115 @@ def watermark_pdf(
     writer.write(buffer)
     buffer.seek(0)
     return buffer.read()  # ← always bytes, never None
+
+
+def format_json(
+    source,
+    indent: int = 4,
+    sort_keys: bool = False,
+    minify: bool = False,
+    ensure_ascii: bool = False,
+) -> dict:
+    """
+    Format / validate / minify JSON from file or raw text.
+
+    Args:
+        source       : uploaded file object OR raw JSON string
+        indent       : indentation spaces (default: 4)
+        sort_keys    : sort keys alphabetically (default: False)
+        minify       : minify JSON (overrides indent) (default: False)
+        ensure_ascii : escape non-ASCII chars (default: False)
+
+    Returns:
+        {
+            'formatted'  : str,
+            'is_valid'   : bool,
+            'key_count'  : int,
+            'size_original' : int,
+            'size_formatted': int,
+            'type'       : 'object' | 'array' | 'other',
+            'depth'      : int,
+        }
+    """
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+    else:
+        raw = source
+
+    raw = raw.strip()
+
+    if not raw:
+        raise ValueError("Empty input. Provide a valid JSON string or file.")
+
+    # ── Parse JSON ────────────────────────────────
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return {
+            "formatted": None,
+            "is_valid": False,
+            "error": str(e),
+            "error_line": e.lineno,
+            "error_column": e.colno,
+            "error_position": e.pos,
+            "size_original": len(raw),
+        }
+
+    # ── Format ────────────────────────────────────
+    if minify:
+        formatted = json.dumps(
+            parsed,
+            separators=(",", ":"),
+            ensure_ascii=ensure_ascii,
+        )
+    else:
+        formatted = json.dumps(
+            parsed,
+            indent=indent,
+            sort_keys=sort_keys,
+            ensure_ascii=ensure_ascii,
+        )
+
+    # ── Analyze structure ─────────────────────────
+    def get_depth(obj, level=0):
+        if isinstance(obj, dict):
+            if not obj:
+                return level
+            return max(get_depth(v, level + 1) for v in obj.values())
+        if isinstance(obj, list):
+            if not obj:
+                return level
+            return max(get_depth(i, level + 1) for i in obj)
+        return level
+
+    def count_keys(obj):
+        if isinstance(obj, dict):
+            return len(obj) + sum(count_keys(v) for v in obj.values())
+        if isinstance(obj, list):
+            return sum(count_keys(i) for i in obj)
+        return 0
+
+    json_type = (
+        "object"
+        if isinstance(parsed, dict)
+        else "array" if isinstance(parsed, list) else "other"
+    )
+
+    return {
+        "formatted": formatted,
+        "is_valid": True,
+        "type": json_type,
+        "depth": get_depth(parsed),
+        "key_count": count_keys(parsed),
+        "item_count": len(parsed) if isinstance(parsed, (dict, list)) else 1,
+        "size_original": len(raw),
+        "size_formatted": len(formatted),
+        "size_original_kb": round(len(raw) / 1024, 2),
+        "size_formatted_kb": round(len(formatted) / 1024, 2),
+        "minified": minify,
+        "sorted_keys": sort_keys,
+        "indent": indent,
+    }

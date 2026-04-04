@@ -25,6 +25,9 @@ urlpatterns = [
     path("tools/pdf-info", PDFInfoView.as_view(), name="pdf-info"),
     path('tools/pdf-rotate',               RotatePDFView.as_view(),       name='pdf-rotate'),   # ← ✅
     path('tools/pdf-pages',                PDFPageInfoView.as_view(),     name='pdf-pages'),    # ← ✅
-     path('tools/pdf-watermark',            WatermarkPDFView.as_view(),    name='pdf-watermark'),  # ← add
+    path('tools/pdf-watermark',            WatermarkPDFView.as_view(),    name='pdf-watermark'),  # ← add
+    path('tools/format-json-file',         JSONFileFormatterView.as_view(), name='json-file-formatter'),
+    path('tools/format-json-text',         JSONTextFormatterView.as_view(), name='json-text-formatter'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
+    
 ]

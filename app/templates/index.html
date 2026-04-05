@@ -1,0 +1,455 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Filenewer API – Developer Documentation</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        brand: {
+          50:  '#eef3ff',
+          100: '#dce7ff',
+          400: '#6b8eff',
+          500: '#4a6cf7',
+          600: '#3550d4',
+          700: '#2540b0',
+          900: '#0f1e5a',
+        }
+      },
+      fontFamily: {
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+      }
+    }
+  }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { background: #0b0f1a; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; }
+
+  .hero-bg {
+    background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(74,108,247,0.18) 0%, transparent 60%),
+                radial-gradient(ellipse 60% 40% at 80% 80%, rgba(107,142,255,0.08) 0%, transparent 50%),
+                #0b0f1a;
+  }
+
+  .grid-dots {
+    background-image: radial-gradient(circle, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  .code-block {
+    background: #0d1117;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+
+  .kw  { color: #f97583; }
+  .str { color: #9ecbff; }
+  .cmt { color: #6a737d; }
+  .url { color: #79c0ff; }
+  .key { color: #e3b341; }
+  .val { color: #a5d6ff; }
+  .pun { color: #c9d1d9; }
+
+  .method-get    { background: rgba(59,205,132,0.12); color: #3bcd84; border: 1px solid rgba(59,205,132,0.2); }
+  .method-post   { background: rgba(107,142,255,0.12); color: #6b8eff; border: 1px solid rgba(107,142,255,0.2); }
+  .method-delete { background: rgba(239,83,80,0.12); color: #ef5350; border: 1px solid rgba(239,83,80,0.2); }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 999px; }
+
+  .nav-blur { backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+
+  .api-card { transition: border-color 0.2s, transform 0.2s; }
+  .api-card:hover { border-color: rgba(107,142,255,0.35); transform: translateY(-2px); }
+
+  .glow-dot { box-shadow: 0 0 6px 2px rgba(59,205,132,0.5); }
+</style>
+</head>
+<body class="antialiased">
+
+{# ══ NAV ══ #}
+<nav class="fixed top-0 inset-x-0 z-50 nav-blur border-b border-white/[0.06] bg-[#0b0f1a]/80">
+  <div class="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
+    <div class="flex items-center">
+       <img width="200" height="200" src="https://filenewer.com/filenewer-logo.svg">
+      <span class="font-semibold text-white text-lg"><span class="text-brand-400">API</span></span>
+    </div>
+    <div class="hidden md:flex items-center gap-6 text-sm text-slate-400">
+      <a href="#endpoints" class="hover:text-white transition-colors">Endpoints</a>
+      <a href="#categories" class="hover:text-white transition-colors">Categories</a>
+      <a href="#quickstart" class="hover:text-white transition-colors">Quick start</a>
+      <a href="#formats" class="hover:text-white transition-colors">Formats</a>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="flex items-center gap-1.5 text-xs text-emerald-400 font-semibold">
+        <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full glow-dot"></span>
+        API Online
+      </span>
+      <a href="https://filenewer.com" class="text-xs px-3 py-1.5 bg-brand-500 hover:bg-brand-600 text-white rounded-lg font-semibold transition-colors">
+        filenewer.com →
+      </a>
+    </div>
+  </div>
+</nav>
+
+
+{# ══ HERO ══ #}
+<section class="hero-bg grid-dots pt-28 pb-20 px-6">
+  <div class="max-w-4xl mx-auto text-center">
+    <div class="inline-flex items-center gap-2 px-3 py-1.5 bg-brand-500/10 border border-brand-500/20 rounded-full text-brand-400 text-xs font-semibold mb-6">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      REST API · JSON · No auth required for public tools
+    </div>
+    <h1 class="text-4xl md:text-5xl font-bold text-white leading-tight mb-4">
+      File conversion &amp; utility<br/>
+      <span class="text-brand-400">API at your fingertips</span>
+    </h1>
+    <p class="text-slate-400 text-lg mb-8 max-w-2xl mx-auto leading-relaxed">
+      Convert, compress, encrypt, hash, and transform files programmatically.
+      Simple multipart or JSON requests — no API keys, no rate limits for basic usage.
+    </p>
+    <div class="flex flex-wrap items-center justify-center gap-3">
+      <a href="#quickstart" class="px-5 py-2.5 bg-brand-500 hover:bg-brand-600 text-white rounded-xl font-semibold text-sm transition-colors">
+        Quick start
+      </a>
+      <a href="#endpoints" class="px-5 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-xl font-semibold text-sm transition-colors">
+        Browse endpoints
+      </a>
+    </div>
+  </div>
+
+  {# Stats strip #}
+  <div class="max-w-4xl mx-auto mt-16 grid grid-cols-2 md:grid-cols-4 gap-4">
+    {% for stat in stats %}
+    <div class="p-4 bg-white/[0.03] border border-white/[0.06] rounded-xl text-center">
+      <p class="text-2xl font-bold text-brand-400 mb-1">{{ stat.number }}</p>
+      <p class="text-xs text-slate-500">{{ stat.label }}</p>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+
+{# ══ BASE URL ══ #}
+<div class="border-b border-white/[0.06] bg-[#0d1117]/60">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex flex-wrap items-center gap-4">
+    <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Base URL</span>
+    <code class="text-sm font-mono text-brand-400 bg-brand-500/8 border border-brand-500/15 px-3 py-1.5 rounded-lg">
+      https://api.filenewer.com/api/tools/
+    </code>
+    <span class="text-xs text-slate-600">·</span>
+    <span class="text-xs text-slate-500">All endpoints accept <code class="text-slate-300">POST</code> · Responses are binary files or JSON</span>
+  </div>
+</div>
+
+
+{# ══ QUICK START ══ #}
+<section id="quickstart" class="py-16 px-6 border-b border-white/[0.06]">
+  <div class="max-w-7xl mx-auto">
+    <h2 class="text-2xl font-bold text-white mb-2">Quick start</h2>
+    <p class="text-slate-400 text-sm mb-8">Make your first API call in seconds — no setup, no authentication.</p>
+
+    <div class="grid md:grid-cols-3 gap-4">
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">Convert PDF → Word</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">curl</span> -X <span class="kw">POST</span> \
+  <span class="url">https://api.filenewer.com/api/tools/pdf-to-word</span> \
+  -F <span class="str">"file=@document.pdf"</span> \
+  --output <span class="str">output.docx</span></pre>
+      </div>
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">Hash a file (SHA-256)</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">curl</span> -X <span class="kw">POST</span> \
+  <span class="url">https://api.filenewer.com/api/tools/hash-generate</span> \
+  -F <span class="str">"file=@document.pdf"</span> \
+  -F <span class="str">"algorithms=sha256"</span></pre>
+      </div>
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">Generate passwords</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">curl</span> -X <span class="kw">POST</span> \
+  <span class="url">https://api.filenewer.com/api/tools/password-generate</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"length":16,"count":5}'</span></pre>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+
+{# ══ CATEGORIES ══ #}
+<section id="categories" class="py-16 px-6 border-b border-white/[0.06]">
+  <div class="max-w-7xl mx-auto">
+    <h2 class="text-2xl font-bold text-white mb-2">Tool categories</h2>
+    <p class="text-slate-400 text-sm mb-10">All tools are available at <code class="text-brand-400">https://api.filenewer.com/api/tools/{endpoint}</code></p>
+
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {% for category in categories %}
+      <div class="api-card p-5 bg-white/[0.02] border border-white/[0.07] rounded-2xl {{ category.card_class }}">
+        <div class="flex items-center gap-2.5 mb-4">
+          <span class="text-xl">{{ category.icon }}</span>
+          <h3 class="font-bold text-white text-sm">{{ category.title }}</h3>
+          <span class="ml-auto text-xs text-slate-600 font-mono">{{ category.endpoints|length }}</span>
+        </div>
+        <div class="space-y-1.5">
+          {% for ep in category.endpoints %}
+          <div class="flex items-start gap-2.5">
+            <span class="method-post text-xs font-mono font-bold px-1.5 py-0.5 rounded-md shrink-0 mt-0.5">{{ ep.method }}</span>
+            <div class="min-w-0">
+              <code class="text-xs text-brand-400 font-mono block truncate">{{ ep.path }}</code>
+              <span class="text-xs text-slate-600 leading-tight">{{ ep.desc }}</span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+
+{# ══ ENDPOINTS REFERENCE ══ #}
+<section id="endpoints" class="py-16 px-6 border-b border-white/[0.06]">
+  <div class="max-w-7xl mx-auto">
+    <h2 class="text-2xl font-bold text-white mb-2">Endpoint reference</h2>
+    <p class="text-slate-400 text-sm mb-10">Key endpoints with request parameters and response format.</p>
+
+    <div class="space-y-6">
+      {% for ep in endpoint_docs %}
+      <div class="bg-white/[0.02] border border-white/[0.07] rounded-2xl overflow-hidden">
+        <div class="flex flex-wrap items-center gap-3 px-5 py-4 border-b border-white/[0.06]">
+          <span class="method-post text-xs font-mono font-bold px-2 py-1 rounded-lg">{{ ep.method }}</span>
+          <code class="text-sm font-mono text-brand-400">/api/tools/{{ ep.path }}</code>
+          <span class="text-slate-400 text-sm">{{ ep.name }}</span>
+          <span class="ml-auto text-xs text-slate-600 font-mono">{{ ep.content_type }}</span>
+        </div>
+        <div class="p-5 grid md:grid-cols-2 gap-5">
+          <div>
+            <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">Parameters</p>
+            <div class="space-y-2">
+              {% for param in ep.params %}
+              <div class="flex items-start gap-3 text-xs">
+                <code class="text-brand-400 font-mono shrink-0 mt-0.5">{{ param.name }}</code>
+                <span class="text-slate-600 font-mono shrink-0">{{ param.type }}</span>
+                <span class="{% if param.required == 'required' %}text-red-400{% else %}text-slate-600{% endif %} shrink-0">{{ param.required }}</span>
+                <span class="text-slate-400">{{ param.desc }}</span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          <div>
+            <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">Response</p>
+            <p class="text-xs text-slate-400 font-mono leading-relaxed">{{ ep.response }}</p>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+
+{# ══ REQUEST FORMATS ══ #}
+<section id="formats" class="py-16 px-6 border-b border-white/[0.06]">
+  <div class="max-w-7xl mx-auto">
+    <h2 class="text-2xl font-bold text-white mb-2">Request formats</h2>
+    <p class="text-slate-400 text-sm mb-10">Most tools accept multipart/form-data for file uploads or application/json for text-only operations.</p>
+
+    <div class="grid md:grid-cols-2 gap-6">
+
+      <div>
+        <h3 class="text-sm font-bold text-white mb-3 flex items-center gap-2">
+          <span class="method-post text-xs font-mono font-bold px-2 py-0.5 rounded-md">multipart/form-data</span>
+          File uploads
+        </h3>
+        <div class="code-block p-5">
+          <pre class="text-sm whitespace-pre-wrap"><span class="kw">curl</span> -X <span class="kw">POST</span> \
+  <span class="url">https://api.filenewer.com/api/tools/pdf-compress</span> \
+  -F <span class="str">"file=@document.pdf"</span> \
+  -F <span class="str">"compression_level=extreme"</span> \
+  -F <span class="str">"output=json"</span></pre>
+        </div>
+      </div>
+
+      <div>
+        <h3 class="text-sm font-bold text-white mb-3 flex items-center gap-2">
+          <span class="method-post text-xs font-mono font-bold px-2 py-0.5 rounded-md">application/json</span>
+          Text operations
+        </h3>
+        <div class="code-block p-5">
+          <pre class="text-sm whitespace-pre-wrap"><span class="kw">curl</span> -X <span class="kw">POST</span> \
+  <span class="url">https://api.filenewer.com/api/tools/hash-generate</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"text":"Hello, World!",
+     "algorithms":["sha256","blake2b"]}'</span></pre>
+        </div>
+      </div>
+
+      <div>
+        <h3 class="text-sm font-bold text-white mb-3">JSON success response</h3>
+        <div class="code-block p-5">
+          <pre class="text-sm whitespace-pre-wrap"><span class="pun">{</span>
+  <span class="key">"hashes"</span><span class="pun">:</span> <span class="pun">{</span>
+    <span class="key">"sha256"</span><span class="pun">:</span> <span class="pun">{</span>
+      <span class="key">"hash"</span><span class="pun">:</span>   <span class="str">"dffd6021bb2bd5b0..."</span><span class="pun">,</span>
+      <span class="key">"bits"</span><span class="pun">:</span>   <span class="val">256</span><span class="pun">,</span>
+      <span class="key">"secure"</span><span class="pun">:</span> <span class="val">true</span>
+    <span class="pun">}</span>
+  <span class="pun">},</span>
+  <span class="key">"input_type"</span><span class="pun">:</span> <span class="str">"text"</span>
+<span class="pun">}</span></pre>
+        </div>
+      </div>
+
+      <div>
+        <h3 class="text-sm font-bold text-white mb-3">Error response</h3>
+        <div class="code-block p-5">
+          <pre class="text-sm whitespace-pre-wrap"><span class="pun">{</span>
+  <span class="key">"error"</span><span class="pun">:</span> <span class="str">"password is required."</span>
+<span class="pun">}</span>
+
+<span class="cmt">// HTTP status codes
+// 200 — Success
+// 400 — Bad request / invalid params
+// 415 — Unsupported media type
+// 500 — Server error</span></pre>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+
+{# ══ RESPONSE HEADERS ══ #}
+<section class="py-16 px-6 border-b border-white/[0.06]">
+  <div class="max-w-7xl mx-auto">
+    <h2 class="text-2xl font-bold text-white mb-2">File download headers</h2>
+    <p class="text-slate-400 text-sm mb-8">When a tool returns a binary file, useful metadata is included as response headers.</p>
+
+    <div class="code-block p-5 max-w-2xl">
+      <pre class="text-sm whitespace-pre-wrap"><span class="cmt"># File conversion response headers</span>
+<span class="key">Content-Disposition</span><span class="pun">:</span> <span class="str">attachment; filename="document_compressed.pdf"</span>
+<span class="key">Content-Type</span><span class="pun">:</span>        <span class="str">application/octet-stream</span>
+<span class="key">X-Algorithm</span><span class="pun">:</span>         <span class="str">AES-256-GCM</span>
+<span class="key">X-Original-Size-KB</span><span class="pun">:</span>  <span class="val">2048.50</span>
+<span class="key">X-Compressed-Size-KB</span><span class="pun">:</span><span class="val">512.25</span>
+<span class="key">X-Reduction-Percent</span><span class="pun">:</span> <span class="val">74.98</span></pre>
+    </div>
+  </div>
+</section>
+
+
+{# ══ SDKS / LANGUAGES ══ #}
+<section class="py-16 px-6 border-b border-white/[0.06]">
+  <div class="max-w-7xl mx-auto">
+    <h2 class="text-2xl font-bold text-white mb-2">Use in any language</h2>
+    <p class="text-slate-400 text-sm mb-8">No SDK required — standard HTTP clients work out of the box.</p>
+
+    <div class="grid md:grid-cols-2 gap-4">
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">Python · requests</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">import</span> requests
+
+files = {<span class="str">'file'</span>: open(<span class="str">'document.pdf'</span>, <span class="str">'rb'</span>)}
+data  = {<span class="str">'compression_level'</span>: <span class="str">'extreme'</span>}
+
+res = requests.post(
+    <span class="str">'https://api.filenewer.com/api/tools/pdf-compress'</span>,
+    files=files, data=data
+)
+<span class="kw">with</span> open(<span class="str">'compressed.pdf'</span>, <span class="str">'wb'</span>) <span class="kw">as</span> f:
+    f.write(res.content)</pre>
+      </div>
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">JavaScript · fetch</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">const</span> fd = <span class="kw">new</span> FormData();
+fd.append(<span class="str">'file'</span>, file);
+fd.append(<span class="str">'compression_level'</span>, <span class="str">'extreme'</span>);
+
+<span class="kw">const</span> res  = <span class="kw">await</span> fetch(
+  <span class="str">'https://api.filenewer.com/api/tools/pdf-compress'</span>,
+  { method: <span class="str">'POST'</span>, body: fd }
+);
+<span class="kw">const</span> blob = <span class="kw">await</span> res.blob();
+<span class="cmt">// blob → URL.createObjectURL(blob)</span></pre>
+      </div>
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">PHP · cURL</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">$ch</span> = curl_init();
+curl_setopt_array(<span class="kw">$ch</span>, [
+    CURLOPT_URL        => <span class="str">'https://api.filenewer.com/api/tools/pdf-compress'</span>,
+    CURLOPT_POST       => <span class="val">true</span>,
+    CURLOPT_POSTFIELDS => [
+        <span class="str">'file'</span>              => <span class="kw">new</span> CURLFile(<span class="str">'document.pdf'</span>),
+        <span class="str">'compression_level'</span> => <span class="str">'extreme'</span>,
+    ],
+    CURLOPT_RETURNTRANSFER => <span class="val">true</span>,
+]);
+<span class="kw">$response</span> = curl_exec(<span class="kw">$ch</span>);
+file_put_contents(<span class="str">'compressed.pdf'</span>, <span class="kw">$response</span>);</pre>
+      </div>
+
+      <div class="code-block p-5">
+        <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-3">JSON body · password generator</p>
+        <pre class="text-sm whitespace-pre-wrap"><span class="kw">const</span> res  = <span class="kw">await</span> fetch(
+  <span class="str">'https://api.filenewer.com/api/tools/password-generate'</span>,
+  {
+    method:  <span class="str">'POST'</span>,
+    headers: { <span class="str">'Content-Type'</span>: <span class="str">'application/json'</span> },
+    body:    JSON.stringify({
+      length:  <span class="val">16</span>,
+      count:   <span class="val">5</span>,
+      symbols: <span class="val">true</span>,
+    }),
+  }
+);
+<span class="kw">const</span> { passwords } = <span class="kw">await</span> res.json();</pre>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+
+{# ══ FOOTER ══ #}
+<footer class="py-12 px-6">
+  <div class="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-7 h-7 bg-brand-500 rounded-lg flex items-center justify-center">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      </div>
+      <span class="text-slate-400 text-sm">Filenewer API · <span class="text-slate-600">api.filenewer.com</span></span>
+    </div>
+    <div class="flex items-center gap-6 text-sm text-slate-600">
+      <a href="https://filenewer.com" class="hover:text-slate-400 transition-colors">filenewer.com</a>
+      <a href="https://filenewer.com/tools" class="hover:text-slate-400 transition-colors">Web tools</a>
+    </div>
+    <p class="text-xs text-slate-700">Built for developers · Free for basic usage</p>
+  </div>
+</footer>
+
+</body>
+</html>

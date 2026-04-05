@@ -12,10 +12,15 @@ from rest_framework.permissions import AllowAny
 from .serializers import PDFUploadSerializer
 from rest_framework.parsers import MultiPartParser, JSONParser
 from .services import convert_pdf_to_docx
-
+from django.shortcuts import render
 from .services import *
 
 logger = logging.getLogger(__name__)
+
+
+
+def index(request):
+    return render(request, 'index.html')
 
 
 class PDFToWordView(APIView):

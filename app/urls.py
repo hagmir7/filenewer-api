@@ -39,6 +39,9 @@ urlpatterns = [
     path('tools/uuid-generate',       UUIDGeneratorView.as_view(),     name='uuid-generate'),
     path('tools/uuid-validate',       UUIDValidateView.as_view(),      name='uuid-validate'),
     path('tools/uuid-bulk',           UUIDBulkView.as_view(),          name='uuid-bulk'),
+    path('tools/file-encrypt',            FileEncryptView.as_view(),       name='file-encrypt'),
+    path('tools/file-decrypt',            FileDecryptView.as_view(),       name='file-decrypt'),
+    path('tools/file-hash',               FileHashView.as_view(),          name='file-hash'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

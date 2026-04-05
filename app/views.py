@@ -2697,3 +2697,186 @@ class UUIDBulkView(APIView):
             return response
 
         return Response(result)
+
+
+
+
+class FileEncryptView(APIView):
+    """
+    POST /api/tools/file/encrypt/
+    Upload any file → returns encrypted .enc file.
+
+    Form fields:
+        file      : any file                             (required)
+        password  : encryption password                 (required)
+        algorithm : AES-256-GCM | AES-256-CBC | ChaCha20 (default: AES-256-GCM)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        password = request.data.get("password", "").strip()
+        algorithm = request.data.get("algorithm", "AES-256-GCM")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not password:
+            return Response(
+                {"error": "password is required."},
+                status=400,
+            )
+        if len(password) < 6:
+            return Response(
+                {"error": "password must be at least 6 characters."},
+                status=400,
+            )
+        if algorithm not in ("AES-256-GCM", "AES-256-CBC", "ChaCha20"):
+            return Response(
+                {"error": "algorithm must be: AES-256-GCM, AES-256-CBC, or ChaCha20."},
+                status=400,
+            )
+
+        # ── Encrypt ───────────────────────────────
+        try:
+            result = encrypt_file(
+                file,
+                password=password,
+                algorithm=algorithm,
+                filename=file.name,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return encrypted file ──────────────────
+        response = HttpResponse(
+            result["encrypted_bytes"],
+            content_type="application/octet-stream",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="{result["output_filename"]}"'
+        )
+        response["Content-Length"] = result["encrypted_size"]
+        response["X-Algorithm"] = result["algorithm"]
+        response["X-Original-Size-KB"] = result["original_size_kb"]
+        response["X-Encrypted-Size-KB"] = result["encrypted_size_kb"]
+        return response
+
+
+class FileDecryptView(APIView):
+    """
+    POST /api/tools/file/decrypt/
+    Upload encrypted .enc file + password → returns original file.
+
+    Form fields:
+        file     : encrypted .enc file    (required)
+        password : decryption password    (required)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        password = request.data.get("password", "").strip()
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not password:
+            return Response(
+                {"error": "password is required."},
+                status=400,
+            )
+
+        # ── Decrypt ───────────────────────────────
+        try:
+            result = decrypt_file(file, password=password)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return original file ───────────────────
+        response = HttpResponse(
+            result["decrypted_bytes"],
+            content_type="application/octet-stream",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="{result["original_filename"]}"'
+        )
+        response["Content-Length"] = result["original_size"]
+        response["X-Algorithm"] = result["algorithm"]
+        response["X-Original-Size-KB"] = result["original_size_kb"]
+        return response
+
+
+class FileHashView(APIView):
+    """
+    POST /api/tools/file/hash/
+    Upload a file or send text → returns hash(es).
+
+    Form fields (file):
+        file       : any file                           (required)
+        algorithms : comma-separated hash algorithms   (default: all)
+                     md5,sha1,sha256,sha512,sha3_256
+
+    JSON body (text):
+        {
+            "text"      : "Hello, World!",
+            "algorithms": ["sha256", "md5"]
+        }
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file", None)
+        text = request.data.get("text", None)
+        algorithms = request.data.get("algorithms", None)
+
+        # ── Validate ──────────────────────────────
+        if not file and not text:
+            return Response(
+                {"error": 'Provide either "file" or "text".'},
+                status=400,
+            )
+
+        # ── Parse algorithms ──────────────────────
+        parsed_algos = None
+        if algorithms:
+            if isinstance(algorithms, str):
+                parsed_algos = [
+                    a.strip().lower() for a in algorithms.split(",") if a.strip()
+                ]
+            elif isinstance(algorithms, list):
+                parsed_algos = [a.lower() for a in algorithms]
+
+        # ── Hash ──────────────────────────────────
+        try:
+            source = file if file else text
+            result = get_file_hash(source, algorithms_list=parsed_algos)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(
+            {
+                "filename": file.name if file else None,
+                "size_kb": result["size_kb"],
+                "size_mb": result["size_mb"],
+                "hashes": result["hashes"],
+            }
+        )

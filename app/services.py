@@ -4236,3 +4236,236 @@ def generate_passphrase(
         "strength": _calculate_strength(total_entropy),
         "crack_time": _estimate_crack_time(total_entropy),
     }
+
+
+def generate_hash(
+    source,
+    algorithms_list: list = None,
+    encoding: str = "utf-8",
+    hmac_key: str = None,
+    output_format: str = "hex",
+) -> dict:
+    """
+    Generate hash(es) from text or file.
+
+    Args:
+        source          : text string | file object | bytes
+        algorithms_list : list of algorithms to use
+                          md5 | sha1 | sha224 | sha256 | sha384 | sha512
+                          sha3_224 | sha3_256 | sha3_384 | sha3_512
+                          blake2b | blake2s | shake_128 | shake_256
+                          default: all
+        encoding        : text encoding                 (default: utf-8)
+        hmac_key        : HMAC secret key              (default: None)
+        output_format   : hex | base64 | base64url | int (default: hex)
+
+    Returns:
+        {
+            'hashes'      : dict,
+            'input_type'  : str,
+            'input_size'  : int,
+            'encoding'    : str,
+            'output_format': str,
+            'is_hmac'     : bool,
+        }
+    """
+    import hashlib
+    import hmac as hmac_lib
+    import base64
+
+    # ── Read source ───────────────────────────────
+    input_type = "text"
+
+    if hasattr(source, "read"):
+        data = source.read()
+        input_type = "file"
+        if isinstance(data, str):
+            data = data.encode(encoding)
+    elif isinstance(source, bytes):
+        data = source
+        input_type = "bytes"
+    elif isinstance(source, str):
+        data = source.encode(encoding)
+        input_type = "text"
+    else:
+        raise ValueError("source must be a string, bytes, or file object.")
+
+    if not data:
+        raise ValueError("Empty input. Nothing to hash.")
+
+    # ── Validate output format ─────────────────────
+    valid_formats = ("hex", "base64", "base64url", "int")
+    if output_format not in valid_formats:
+        raise ValueError(
+            f'Invalid output_format: "{output_format}". '
+            f"Must be one of: {valid_formats}"
+        )
+
+    # ── All supported algorithms ───────────────────
+    all_algorithms = {
+        "md5": {"fn": hashlib.md5, "bits": 128, "secure": False},
+        "sha1": {"fn": hashlib.sha1, "bits": 160, "secure": False},
+        "sha224": {"fn": hashlib.sha224, "bits": 224, "secure": True},
+        "sha256": {"fn": hashlib.sha256, "bits": 256, "secure": True},
+        "sha384": {"fn": hashlib.sha384, "bits": 384, "secure": True},
+        "sha512": {"fn": hashlib.sha512, "bits": 512, "secure": True},
+        "sha3_224": {"fn": hashlib.sha3_224, "bits": 224, "secure": True},
+        "sha3_256": {"fn": hashlib.sha3_256, "bits": 256, "secure": True},
+        "sha3_384": {"fn": hashlib.sha3_384, "bits": 384, "secure": True},
+        "sha3_512": {"fn": hashlib.sha3_512, "bits": 512, "secure": True},
+        "blake2b": {"fn": hashlib.blake2b, "bits": 512, "secure": True},
+        "blake2s": {"fn": hashlib.blake2s, "bits": 256, "secure": True},
+        "shake_128": {"fn": hashlib.shake_128, "bits": 128, "secure": True},
+        "shake_256": {"fn": hashlib.shake_256, "bits": 256, "secure": True},
+    }
+
+    # ── Select algorithms ─────────────────────────
+    if algorithms_list is None:
+        selected = list(all_algorithms.keys())
+    else:
+        selected = [a.lower().strip() for a in algorithms_list]
+        invalid = [a for a in selected if a not in all_algorithms]
+        if invalid:
+            raise ValueError(
+                f"Unsupported algorithm(s): {invalid}. "
+                f"Supported: {list(all_algorithms.keys())}"
+            )
+
+    # ── Format digest ─────────────────────────────
+    def format_digest(digest_bytes: bytes) -> str:
+        if output_format == "hex":
+            return digest_bytes.hex()
+        elif output_format == "base64":
+            return base64.b64encode(digest_bytes).decode("utf-8")
+        elif output_format == "base64url":
+            return base64.urlsafe_b64encode(digest_bytes).decode("utf-8")
+        elif output_format == "int":
+            return str(int.from_bytes(digest_bytes, "big"))
+        return digest_bytes.hex()
+
+    # ── Compute hashes ────────────────────────────
+    hashes = {}
+    is_hmac = bool(hmac_key)
+    hmac_key_b = hmac_key.encode(encoding) if hmac_key else None
+
+    for algo in selected:
+        info = all_algorithms[algo]
+        try:
+            if is_hmac:
+                # HMAC mode
+                if algo in ("shake_128", "shake_256"):
+                    hashes[algo] = {
+                        "hash": "[HMAC not supported for SHAKE]",
+                        "bits": info["bits"],
+                        "secure": info["secure"],
+                        "error": True,
+                    }
+                    continue
+
+                h = hmac_lib.new(
+                    hmac_key_b,
+                    data,
+                    info["fn"],
+                )
+                digest = h.digest()
+
+            else:
+                # Regular hash
+                if algo == "shake_128":
+                    h = hashlib.shake_128(data)
+                    digest = h.digest(16)  # 128 bits = 16 bytes
+                elif algo == "shake_256":
+                    h = hashlib.shake_256(data)
+                    digest = h.digest(32)  # 256 bits = 32 bytes
+                else:
+                    h = info["fn"](data)
+                    digest = h.digest()
+
+            hashes[algo] = {
+                "hash": format_digest(digest),
+                "bits": info["bits"],
+                "length": (
+                    len(digest) * 2
+                    if output_format == "hex"
+                    else len(format_digest(digest))
+                ),
+                "secure": info["secure"],
+                "error": False,
+            }
+
+        except Exception as e:
+            hashes[algo] = {
+                "hash": None,
+                "error": True,
+                "message": str(e),
+            }
+
+    return {
+        "hashes": hashes,
+        "input_type": input_type,
+        "input_size": len(data),
+        "input_size_kb": round(len(data) / 1024, 2),
+        "encoding": encoding,
+        "output_format": output_format,
+        "is_hmac": is_hmac,
+        "algorithm_count": len(hashes),
+    }
+
+
+def compare_hashes(
+    hash1: str,
+    hash2: str,
+) -> dict:
+    """
+    Securely compare two hash strings.
+    Uses constant-time comparison to prevent timing attacks.
+
+    Args:
+        hash1 : first hash string
+        hash2 : second hash string
+
+    Returns:
+        { 'match', 'hash1_length', 'hash2_length' }
+    """
+    import hmac
+
+    h1 = hash1.strip().lower()
+    h2 = hash2.strip().lower()
+
+    # Constant-time comparison
+    match = hmac.compare_digest(h1, h2)
+
+    return {
+        "match": match,
+        "hash1_length": len(h1),
+        "hash2_length": len(h2),
+        "message": "Hashes match." if match else "Hashes do not match.",
+    }
+
+
+def generate_checksum(
+    source,
+    algorithm: str = "sha256",
+) -> dict:
+    """
+    Generate a file checksum for integrity verification.
+
+    Args:
+        source    : file object OR bytes
+        algorithm : hash algorithm to use    (default: sha256)
+
+    Returns:
+        { 'checksum', 'algorithm', 'filename', 'size' }
+    """
+    result = generate_hash(
+        source,
+        algorithms_list=[algorithm],
+        output_format="hex",
+    )
+
+    return {
+        "checksum": result["hashes"][algorithm]["hash"],
+        "algorithm": algorithm,
+        "size_kb": result["input_size_kb"],
+        "size": result["input_size"],
+    }

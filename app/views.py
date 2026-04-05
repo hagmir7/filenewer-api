@@ -3060,3 +3060,162 @@ class PassphraseGeneratorView(APIView):
             return Response({"error": str(e)}, status=500)
 
         return Response(result)
+
+
+class HashGeneratorView(APIView):
+    """
+    POST /api/tools/hash-generate/
+    Generate hash(es) from text or file.
+
+    JSON body (text):
+        {
+            "text"        : "Hello, World!",
+            "algorithms"  : ["sha256", "md5"],
+            "encoding"    : "utf-8",
+            "hmac_key"    : null,
+            "output_format": "hex"
+        }
+
+    Form fields (file):
+        file          : any file                          (required)
+        algorithms    : comma-separated algorithms        (default: all)
+        hmac_key      : HMAC secret key                  (optional)
+        output_format : hex | base64 | base64url | int   (default: hex)
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file", None)
+        text = request.data.get("text", None)
+        algorithms = request.data.get("algorithms", None)
+        encoding = request.data.get("encoding", "utf-8")
+        hmac_key = request.data.get("hmac_key", None)
+        output_format = request.data.get("output_format", "hex")
+
+        # ── Validate ──────────────────────────────
+        if not file and text is None:
+            return Response(
+                {"error": 'Provide either "file" or "text".'},
+                status=400,
+            )
+
+        if output_format not in ("hex", "base64", "base64url", "int"):
+            return Response(
+                {"error": "output_format must be: hex, base64, base64url, or int."},
+                status=400,
+            )
+
+        # ── Parse algorithms ──────────────────────
+        parsed_algos = None
+        if algorithms:
+            if isinstance(algorithms, str):
+                parsed_algos = [
+                    a.strip().lower() for a in algorithms.split(",") if a.strip()
+                ]
+            elif isinstance(algorithms, list):
+                parsed_algos = [a.lower() for a in algorithms]
+
+        # ── Generate hash ──────────────────────────
+        try:
+            source = file if file else str(text)
+            result = generate_hash(
+                source,
+                algorithms_list=parsed_algos,
+                encoding=encoding,
+                hmac_key=hmac_key,
+                output_format=output_format,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(
+            {
+                "filename": file.name if file else None,
+                "input_type": result["input_type"],
+                "input_size_kb": result["input_size_kb"],
+                "encoding": result["encoding"],
+                "output_format": result["output_format"],
+                "is_hmac": result["is_hmac"],
+                "algorithm_count": result["algorithm_count"],
+                "hashes": result["hashes"],
+            }
+        )
+
+
+class HashCompareView(APIView):
+    """
+    POST /api/tools/hash-compare/
+    Securely compare two hash strings.
+
+    JSON body:
+        {
+            "hash1": "a665a45920422f9d...",
+            "hash2": "a665a45920422f9d..."
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        hash1 = request.data.get("hash1")
+        hash2 = request.data.get("hash2")
+
+        if not hash1 or not hash2:
+            return Response(
+                {"error": 'Both "hash1" and "hash2" are required.'},
+                status=400,
+            )
+
+        try:
+            result = compare_hashes(str(hash1), str(hash2))
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class FileChecksumView(APIView):
+    """
+    POST /api/tools/file-checksum/
+    Generate a file checksum for integrity verification.
+
+    Form fields:
+        file      : any file                    (required)
+        algorithm : hash algorithm              (default: sha256)
+                    md5|sha1|sha256|sha512|...
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        algorithm = request.data.get("algorithm", "sha256")
+
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        try:
+            result = generate_checksum(file, algorithm=algorithm)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(
+            {
+                "filename": file.name,
+                "checksum": result["checksum"],
+                "algorithm": result["algorithm"],
+                "size_kb": result["size_kb"],
+                "size": result["size"],
+            }
+        )

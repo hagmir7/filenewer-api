@@ -2699,8 +2699,6 @@ class UUIDBulkView(APIView):
         return Response(result)
 
 
-
-
 class FileEncryptView(APIView):
     """
     POST /api/tools/file/encrypt/
@@ -2880,3 +2878,185 @@ class FileHashView(APIView):
                 "hashes": result["hashes"],
             }
         )
+
+
+class PasswordGeneratorView(APIView):
+    """
+    POST /api/tools/password-generate/
+    Generate secure password(s) with full options.
+
+    JSON body:
+        {
+            "length"          : 16,
+            "count"           : 1,
+            "uppercase"       : true,
+            "lowercase"       : true,
+            "digits"          : true,
+            "symbols"         : true,
+            "exclude_chars"   : "",
+            "exclude_similar" : false,
+            "exclude_ambiguous": false,
+            "custom_chars"    : "",
+            "prefix"          : "",
+            "suffix"          : "",
+            "no_repeat"       : false
+        }
+    """
+
+    parser_classes = [JSONParser, MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        length = request.data.get("length", 16)
+        count = request.data.get("count", 1)
+        uppercase = request.data.get("uppercase", True)
+        lowercase = request.data.get("lowercase", True)
+        digits = request.data.get("digits", True)
+        symbols = request.data.get("symbols", True)
+        exclude_chars = request.data.get("exclude_chars", "")
+        exclude_similar = request.data.get("exclude_similar", False)
+        exclude_ambiguous = request.data.get("exclude_ambiguous", False)
+        custom_chars = request.data.get("custom_chars", "")
+        prefix = request.data.get("prefix", "")
+        suffix = request.data.get("suffix", "")
+        no_repeat = request.data.get("no_repeat", False)
+
+        # ── Parse types ───────────────────────────
+        try:
+            length = int(length)
+            count = int(count)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "length and count must be integers."},
+                status=400,
+            )
+
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        uppercase = to_bool(uppercase)
+        lowercase = to_bool(lowercase)
+        digits = to_bool(digits)
+        symbols = to_bool(symbols)
+        exclude_similar = to_bool(exclude_similar)
+        exclude_ambiguous = to_bool(exclude_ambiguous)
+        no_repeat = to_bool(no_repeat)
+
+        # ── Generate ──────────────────────────────
+        try:
+            result = generate_password(
+                length=length,
+                count=count,
+                uppercase=uppercase,
+                lowercase=lowercase,
+                digits=digits,
+                symbols=symbols,
+                exclude_chars=str(exclude_chars),
+                exclude_similar=exclude_similar,
+                exclude_ambiguous=exclude_ambiguous,
+                custom_chars=str(custom_chars),
+                prefix=str(prefix),
+                suffix=str(suffix),
+                no_repeat=no_repeat,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class PasswordStrengthView(APIView):
+    """
+    POST /api/tools/password-strength/
+    Check strength of an existing password.
+
+    JSON body:
+        {
+            "password": "MyPassword123!"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        password = request.data.get("password")
+
+        if not password:
+            return Response(
+                {"error": '"password" field is required.'},
+                status=400,
+            )
+
+        try:
+            result = check_password_strength(str(password))
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class PassphraseGeneratorView(APIView):
+    """
+    POST /api/tools/passphrase-generate/
+    Generate memorable passphrase(s).
+
+    JSON body:
+        {
+            "words"        : 4,
+            "count"        : 1,
+            "separator"    : "-",
+            "capitalize"   : true,
+            "include_digit": true
+        }
+    """
+
+    parser_classes = [JSONParser, MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        words = request.data.get("words", 4)
+        count = request.data.get("count", 1)
+        separator = request.data.get("separator", "-")
+        capitalize = request.data.get("capitalize", True)
+        include_digit = request.data.get("include_digit", True)
+
+        # ── Parse ─────────────────────────────────
+        try:
+            words = int(words)
+            count = int(count)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "words and count must be integers."},
+                status=400,
+            )
+
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        capitalize = to_bool(capitalize)
+        include_digit = to_bool(include_digit)
+
+        # ── Generate ──────────────────────────────
+        try:
+            result = generate_passphrase(
+                words=words,
+                count=count,
+                separator=str(separator),
+                capitalize=capitalize,
+                include_digit=include_digit,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)

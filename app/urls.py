@@ -42,6 +42,9 @@ urlpatterns = [
     path('tools/file-encrypt',            FileEncryptView.as_view(),       name='file-encrypt'),
     path('tools/file-decrypt',            FileDecryptView.as_view(),       name='file-decrypt'),
     path('tools/file-hash',               FileHashView.as_view(),          name='file-hash'),
+    path('tools/password-generate',       PasswordGeneratorView.as_view(),  name='password-generate'),
+    path('tools/password-strength',       PasswordStrengthView.as_view(),   name='password-strength'),
+    path('tools/passphrase-generate',     PassphraseGeneratorView.as_view(),name='passphrase-generate'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

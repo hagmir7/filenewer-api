@@ -176,7 +176,8 @@ REST_FRAMEWORK = {
     # Renderers (response format)
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",  # remove in production
+        # "rest_framework.renderers.JSONRenderer",
+        # "rest_framework.renderers.BrowsableAPIRenderer",  # remove in production
     ],
     # Parsers (accepted request formats)
     "DEFAULT_PARSER_CLASSES": [

@@ -4469,3 +4469,118 @@ def generate_checksum(
         "size_kb": result["input_size_kb"],
         "size": result["input_size"],
     }
+
+
+def word_to_jpg(
+    source,
+    filename: str = "document.docx",
+    dpi: int = 200,
+    quality: int = 85,
+    pages: list = None,
+) -> list[dict]:
+    """
+    Convert Word (.docx) → JPG images (one per page).
+
+    Strategy:
+        1. Convert Word → PDF (using word_to_pdf service)
+        2. Convert PDF pages → JPG images (using pymupdf)
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        filename : original filename
+        dpi      : image resolution 72-600    (default: 200)
+        quality  : JPG quality 1-95           (default: 85)
+        pages    : list of page numbers (1-based) None = all pages
+
+    Returns:
+        list of {
+            'page'    : int,
+            'bytes'   : bytes,
+            'width'   : int,
+            'height'  : int,
+            'filename': str,
+            'size_kb' : float,
+        }
+    """
+    import fitz
+    from PIL import Image
+
+    # ── Read file bytes ────────────────────────────
+    if hasattr(source, "read"):
+        file_bytes = source.read()
+    else:
+        file_bytes = source
+
+    if not file_bytes:
+        raise ValueError("Empty file.")
+
+    # ── Step 1: Word → PDF ─────────────────────────
+    pdf_bytes = word_to_pdf(
+        io.BytesIO(file_bytes),
+        filename=filename,
+    )
+
+    if not pdf_bytes:
+        raise RuntimeError("Failed to convert Word to PDF.")
+
+    # ── Step 2: PDF → JPG ─────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = len(doc)
+
+    # ── Validate pages ────────────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"Document has {total_pages} pages (1-{total_pages})."
+            )
+        pages_to_convert = pages
+    else:
+        pages_to_convert = list(range(1, total_pages + 1))
+
+    # ── Convert each page → JPG ───────────────────
+    zoom = dpi / 72
+    matrix = fitz.Matrix(zoom, zoom)
+    results = []
+
+    base_name = (
+        filename.replace(".docx", "")
+        .replace(".doc", "")
+        .replace(".DOCX", "")
+        .replace(".DOC", "")
+    )
+
+    for page_num in pages_to_convert:
+        page = doc[page_num - 1]
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+
+        image = Image.frombytes(
+            "RGB",
+            [pixmap.width, pixmap.height],
+            pixmap.samples,
+        )
+
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+        )
+        buffer.seek(0)
+        jpg_bytes = buffer.read()
+
+        results.append(
+            {
+                "page": page_num,
+                "bytes": jpg_bytes,
+                "width": pixmap.width,
+                "height": pixmap.height,
+                "filename": f"{base_name}_page_{page_num}.jpg",
+                "size_kb": round(len(jpg_bytes) / 1024, 2),
+            }
+        )
+
+    doc.close()
+    return results

@@ -49,6 +49,7 @@ urlpatterns = [
     path('tools/hash-generate',           HashGeneratorView.as_view(),      name='hash-generate'),
     path('tools/hash-compare',            HashCompareView.as_view(),        name='hash-compare'),
     path('tools/file-checksum',           FileChecksumView.as_view(),       name='file-checksum'),
+    path('tools/word-to-jpg',           WordToJPGView.as_view(),          name='word-to-jpg'),
 
     path("health/", HealthCheckView.as_view(), name="health-check"),
     

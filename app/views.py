@@ -18,7 +18,6 @@ from .services import *
 logger = logging.getLogger(__name__)
 
 
-
 def index(request):
     return render(request, 'index.html')
 
@@ -3224,3 +3223,182 @@ class FileChecksumView(APIView):
                 "size": result["size"],
             }
         )
+
+
+
+
+class WordToJPGView(APIView):
+    """
+    POST /api/convert/word-to-jpg/
+    Upload a Word file (.docx/.doc) → returns JPG image(s).
+
+    Form fields:
+        file     : Word file (.docx / .doc)              (required)
+        dpi      : image resolution 72-600               (default: 200)
+        quality  : JPG quality 1-95                      (default: 85)
+        pages    : comma-separated page numbers          (default: all)
+                   e.g. "1" or "1,3,5"
+        output   : single | zip | base64                 (default: zip)
+                   - single  → first (or specific) page as .jpg
+                   - zip     → all pages as .zip of .jpg files
+                   - base64  → JSON with base64 encoded images
+        filename : output filename                       (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        dpi = request.data.get("dpi", "200")
+        quality = request.data.get("quality", "85")
+        pages = request.data.get("pages", None)
+        output = request.data.get("output", "zip")
+        filename = request.data.get("filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        if not file.name.lower().endswith((".docx", ".doc")):
+            return Response(
+                {"error": "Only .docx or .doc files are accepted."},
+                status=400,
+            )
+
+        if output not in ("single", "zip", "base64"):
+            return Response(
+                {"error": "output must be: single, zip, or base64."},
+                status=400,
+            )
+
+        # ── Parse DPI ─────────────────────────────
+        try:
+            dpi = int(dpi)
+            if not (72 <= dpi <= 600):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "dpi must be an integer between 72 and 600."},
+                status=400,
+            )
+
+        # ── Parse quality ─────────────────────────
+        try:
+            quality = int(quality)
+            if not (1 <= quality <= 95):
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "quality must be an integer between 1 and 95."},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        parsed_pages = None
+        if pages:
+            try:
+                parsed_pages = [int(p.strip()) for p in pages.split(",") if p.strip()]
+            except ValueError:
+                return Response(
+                    {"error": 'pages must be comma-separated integers: e.g. "1,2,3"'},
+                    status=400,
+                )
+
+        # ── Base filename ─────────────────────────
+        base_name = (
+            file.name.replace(".docx", "")
+            .replace(".doc", "")
+            .replace(".DOCX", "")
+            .replace(".DOC", "")
+        )
+
+        # ── Convert ───────────────────────────────
+        try:
+            jpg_pages = word_to_jpg(
+                file,
+                filename=file.name,
+                dpi=dpi,
+                quality=quality,
+                pages=parsed_pages,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except RuntimeError as e:
+            return Response({"error": str(e)}, status=500)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        if not jpg_pages:
+            return Response(
+                {"error": "No pages found in document."},
+                status=400,
+            )
+
+        # ── Output: single JPG ─────────────────────
+        if output == "single":
+            first = jpg_pages[0]
+            out_name = filename or f'{base_name}_page_{first["page"]}.jpg'
+            if not out_name.endswith(".jpg"):
+                out_name += ".jpg"
+
+            response = HttpResponse(first["bytes"], content_type="image/jpeg")
+            response["Content-Disposition"] = f'attachment; filename="{out_name}"'
+            response["Content-Length"] = len(first["bytes"])
+            response["X-Page"] = first["page"]
+            response["X-Width"] = first["width"]
+            response["X-Height"] = first["height"]
+            response["X-Size-KB"] = first["size_kb"]
+            return response
+
+        # ── Output: ZIP of all pages ───────────────
+        if output == "zip":
+            import zipfile
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in jpg_pages:
+                    zf.writestr(
+                        f'{base_name}_page_{p["page"]}.jpg',
+                        p["bytes"],
+                    )
+            zip_buffer.seek(0)
+
+            out_name = filename or f"{base_name}_pages.zip"
+            if not out_name.endswith(".zip"):
+                out_name += ".zip"
+
+            response = HttpResponse(
+                zip_buffer.read(),
+                content_type="application/zip",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{out_name}"'
+            response["X-Total-Pages"] = len(jpg_pages)
+            return response
+
+        # ── Output: base64 JSON ────────────────────
+        if output == "base64":
+            data = [
+                {
+                    "page": p["page"],
+                    "filename": f'{base_name}_page_{p["page"]}.jpg',
+                    "width": p["width"],
+                    "height": p["height"],
+                    "size_kb": p["size_kb"],
+                    "base64": base64.b64encode(p["bytes"]).decode("utf-8"),
+                }
+                for p in jpg_pages
+            ]
+
+            return Response(
+                {
+                    "total_pages": len(data),
+                    "dpi": dpi,
+                    "quality": quality,
+                    "format": "JPG",
+                    "pages": data,
+                }
+            )

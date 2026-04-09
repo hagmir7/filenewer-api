@@ -3685,8 +3685,6 @@ class TXTToWordView(APIView):
         return response
 
 
-
-
 class MergeDOCXView(APIView):
     """
     POST /api/tools/merge-docx/
@@ -3786,3 +3784,167 @@ class MergeDOCXView(APIView):
         response["X-Files-Merged"] = len(files)
         response["X-File-Names"] = ", ".join(f.name for f in files)
         return response
+
+
+
+
+class SplitDOCXView(APIView):
+    """
+    POST /api/tools/split-docx/
+    Upload a Word file → returns split .docx files as .zip.
+
+    Form fields:
+        file          : Word file (.docx / .doc)           (required)
+        split_by      : page | heading | chunk | range     (default: page)
+        heading_level : 1-6 (for heading mode)             (default: 1)
+        chunk_size    : paragraphs per chunk               (default: 10)
+        pages         : JSON array for range mode          (optional)
+                        e.g. [[1,3],[4,6]] or [1,3,5]
+        output        : zip | json                         (default: zip)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        split_by = request.data.get("split_by", "page")
+        heading_level = request.data.get("heading_level", "1")
+        chunk_size = request.data.get("chunk_size", "10")
+        pages_raw = request.data.get("pages", None)
+        output = request.data.get("output", "zip")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        if not file.name.lower().endswith((".docx", ".doc")):
+            return Response(
+                {"error": "Only .docx or .doc files are accepted."},
+                status=400,
+            )
+
+        if split_by not in ("page", "heading", "chunk", "range"):
+            return Response(
+                {"error": "split_by must be: page, heading, chunk, or range."},
+                status=400,
+            )
+
+        if output not in ("zip", "json"):
+            return Response(
+                {"error": "output must be: zip or json."},
+                status=400,
+            )
+
+        # ── Parse heading_level ───────────────────
+        try:
+            heading_level = int(heading_level)
+            if not (1 <= heading_level <= 6):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "heading_level must be an integer between 1 and 6."},
+                status=400,
+            )
+
+        # ── Parse chunk_size ──────────────────────
+        try:
+            chunk_size = int(chunk_size)
+            if chunk_size < 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "chunk_size must be a positive integer."},
+                status=400,
+            )
+
+        # ── Parse pages (range mode) ───────────────
+        parsed_pages = None
+        if pages_raw:
+            import json as _json
+
+            try:
+                if isinstance(pages_raw, str):
+                    parsed_pages = _json.loads(pages_raw)
+                elif isinstance(pages_raw, list):
+                    parsed_pages = pages_raw
+            except Exception:
+                return Response(
+                    {"error": "pages must be valid JSON: [[1,3],[4,6]] or [1,3,5]"},
+                    status=400,
+                )
+
+        if split_by == "range" and not parsed_pages:
+            return Response(
+                {"error": "pages is required for range mode. e.g. [[1,3],[4,6]]"},
+                status=400,
+            )
+
+        # ── Split ─────────────────────────────────
+        try:
+            parts = split_docx(
+                file,
+                split_by=split_by,
+                pages=parsed_pages,
+                heading_level=heading_level,
+                chunk_size=chunk_size,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        base_name = (
+            file.name.replace(".docx", "")
+            .replace(".doc", "")
+            .replace(".DOCX", "")
+            .replace(".DOC", "")
+        )
+
+        # ── Output: JSON (metadata only) ──────────
+        if output == "json":
+            return Response(
+                {
+                    "total_parts": len(parts),
+                    "split_by": split_by,
+                    "parts": [
+                        {
+                            "index": p["index"],
+                            "filename": p["filename"],
+                            "title": p["title"],
+                            "paragraphs": p["paragraphs"],
+                            "size_kb": p["size_kb"],
+                        }
+                        for p in parts
+                    ],
+                }
+            )
+
+        # ── Output: ZIP of all parts (default) ────
+        import zipfile
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for part in parts:
+                zf.writestr(part["filename"], part["bytes"])
+
+        zip_buffer.seek(0)
+
+        response = HttpResponse(
+            zip_buffer.read(),
+            content_type="application/zip",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="{base_name}_split.zip"'
+        )
+        response["X-Total-Parts"] = len(parts)
+        response["X-Split-By"] = split_by
+        return response
+
+
+
+
+

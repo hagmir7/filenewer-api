@@ -53,6 +53,7 @@ urlpatterns = [
     path('tools/word-to-txt',           WordToTXTView.as_view(),          name='word-to-txt'),
     path('tools/txt-to-word',           TXTToWordView.as_view(),          name='txt-to-word'),
     path('tools/merge-docx',              MergeDOCXView.as_view(),          name='merge-docx'),
+     path('tools/split-docx',              SplitDOCXView.as_view(),          name='split-docx'),  # ← add
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

@@ -5379,3 +5379,368 @@ def _add_toc(doc):
     para.append(run3)
 
     doc.element.body.insert(1, para)
+
+
+def split_docx(
+    source,
+    split_by: str = "page",
+    pages: list = None,
+    heading_level: int = 1,
+    chunk_size: int = 1,
+) -> list[dict]:
+    """
+    Split a Word (.docx) file into multiple documents.
+
+    Args:
+        source        : uploaded file object OR raw bytes
+        split_by      : 'page'    → split by page break
+                        'heading' → split at each heading
+                        'chunk'   → split every N paragraphs
+                        'range'   → extract specific page ranges
+        pages         : list of page ranges for 'range' mode
+                        e.g. [[1,3], [4,6]] or [1, 3, 5]
+        heading_level : heading level to split on (1-6)  (default: 1)
+        chunk_size    : paragraphs per chunk             (default: 1)
+
+    Returns:
+        list of {
+            'index'    : int,
+            'filename' : str,
+            'bytes'    : bytes,
+            'title'    : str,
+            'paragraphs': int,
+            'size_kb'  : float,
+        }
+    """
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    from docx.text.paragraph import Paragraph as DocxPara
+    from docx.table import Table as DocxTable
+    import copy
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        file_bytes = source.read()
+        filename = getattr(source, "name", "document.docx")
+    elif isinstance(source, bytes):
+        file_bytes = source
+        filename = "document.docx"
+    else:
+        raise ValueError("Invalid source.")
+
+    if not file_bytes:
+        raise ValueError("Empty file.")
+
+    base_name = (
+        filename.replace(".docx", "")
+        .replace(".doc", "")
+        .replace(".DOCX", "")
+        .replace(".DOC", "")
+    )
+
+    # ── Open document ─────────────────────────────
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise ValueError(f"Cannot open Word document: {e}")
+
+    # ── Validate split_by ─────────────────────────
+    valid_split = ("page", "heading", "chunk", "range")
+    if split_by not in valid_split:
+        raise ValueError(f"split_by must be one of: {valid_split}")
+
+    # ── Helper: create new doc with same styles ────
+    def create_new_doc() -> Document:
+        new_doc = Document()
+
+        # Copy styles
+        for style in doc.styles:
+            try:
+                if style.name not in {s.name for s in new_doc.styles}:
+                    new_doc.styles.element.append(copy.deepcopy(style.element))
+            except Exception:
+                pass
+
+        # Copy page layout from source
+        try:
+            src_section = doc.sections[0]
+            dest_section = new_doc.sections[0]
+            dest_section.page_width = src_section.page_width
+            dest_section.page_height = src_section.page_height
+            dest_section.left_margin = src_section.left_margin
+            dest_section.right_margin = src_section.right_margin
+            dest_section.top_margin = src_section.top_margin
+            dest_section.bottom_margin = src_section.bottom_margin
+        except Exception:
+            pass
+
+        # Remove default empty paragraph
+        for p in new_doc.paragraphs:
+            p._element.getparent().remove(p._element)
+
+        return new_doc
+
+    def doc_to_bytes(d: Document) -> bytes:
+        buf = io.BytesIO()
+        d.save(buf)
+        buf.seek(0)
+        return buf.read()
+
+    def get_para_title(para) -> str:
+        return para.text.strip()[:80] if para.text.strip() else ""
+
+    def append_element(new_doc, element):
+        new_doc.element.body.append(copy.deepcopy(element))
+
+    def count_paragraphs(d: Document) -> int:
+        return len([p for p in d.paragraphs if p.text.strip()])
+
+    def is_page_break(element) -> bool:
+        """Check if element contains a page break."""
+        xml = element.xml if hasattr(element, "xml") else ""
+        return (
+            f'w:type="page"' in xml
+            or f"w:type='page'" in xml
+            or "w:lastRenderedPageBreak" in xml
+        )
+
+    def is_heading(para, level=1) -> bool:
+        """Check if paragraph is a heading of given level."""
+        style_name = para.style.name if para.style else ""
+        return f"Heading {level}" in style_name
+
+    def finalize_part(new_doc, index, title, base_name) -> dict:
+        """Convert doc to bytes and build result dict."""
+        raw = doc_to_bytes(new_doc)
+        safe_t = re.sub(r"[^\w\s-]", "", title)[:40].strip()
+        fname = f"{base_name}_part{index}"
+        if safe_t:
+            fname += f"_{safe_t}"
+        fname += ".docx"
+
+        return {
+            "index": index,
+            "filename": fname,
+            "bytes": raw,
+            "title": title or f"Part {index}",
+            "paragraphs": count_paragraphs(new_doc),
+            "size_kb": round(len(raw) / 1024, 2),
+        }
+
+    results = []
+
+    # ────────────────────────────────────────────────
+    # MODE 1: Split by page break
+    # ────────────────────────────────────────────────
+    if split_by == "page":
+        current_doc = create_new_doc()
+        current_title = ""
+        part_index = 1
+
+        for element in doc.element.body:
+            tag = element.tag.split("}")[-1]
+
+            if tag == "sectPr":
+                continue
+
+            # Check for page break
+            if is_page_break(element):
+                # Save current part (without the page break element)
+                if (
+                    count_paragraphs(current_doc) > 0
+                    or len(current_doc.element.body) > 0
+                ):
+                    results.append(
+                        finalize_part(current_doc, part_index, current_title, base_name)
+                    )
+                    part_index += 1
+                    current_doc = create_new_doc()
+                    current_title = ""
+                continue
+
+            # Set title from first heading or paragraph
+            if not current_title and tag == "p":
+                para = DocxPara(element, doc)
+                if para.text.strip():
+                    current_title = get_para_title(para)
+
+            append_element(current_doc, element)
+
+        # Save last part
+        if len(current_doc.element.body) > 0:
+            results.append(
+                finalize_part(current_doc, part_index, current_title, base_name)
+            )
+
+    # ────────────────────────────────────────────────
+    # MODE 2: Split by heading
+    # ────────────────────────────────────────────────
+    elif split_by == "heading":
+        current_doc = create_new_doc()
+        current_title = f"Part 1"
+        part_index = 1
+        found_first = False
+
+        for element in doc.element.body:
+            tag = element.tag.split("}")[-1]
+
+            if tag == "sectPr":
+                continue
+
+            if tag == "p":
+                para = DocxPara(element, doc)
+
+                if is_heading(para, heading_level):
+                    # Save previous part if it has content
+                    if found_first and count_paragraphs(current_doc) > 0:
+                        results.append(
+                            finalize_part(
+                                current_doc, part_index, current_title, base_name
+                            )
+                        )
+                        part_index += 1
+                        current_doc = create_new_doc()
+
+                    current_title = get_para_title(para)
+                    found_first = True
+
+            append_element(current_doc, element)
+
+        # Save last part
+        if count_paragraphs(current_doc) > 0:
+            results.append(
+                finalize_part(current_doc, part_index, current_title, base_name)
+            )
+
+        # If no headings found
+        if not results:
+            raise ValueError(
+                f"No Heading {heading_level} found in document. "
+                f"Try a different heading_level or split_by mode."
+            )
+
+    # ────────────────────────────────────────────────
+    # MODE 3: Split by chunk (every N paragraphs)
+    # ────────────────────────────────────────────────
+    elif split_by == "chunk":
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be at least 1.")
+
+        current_doc = create_new_doc()
+        current_title = ""
+        part_index = 1
+        para_count = 0
+
+        for element in doc.element.body:
+            tag = element.tag.split("}")[-1]
+
+            if tag == "sectPr":
+                continue
+
+            append_element(current_doc, element)
+
+            if tag == "p":
+                para = DocxPara(element, doc)
+                if para.text.strip():
+                    if not current_title:
+                        current_title = get_para_title(para)
+                    para_count += 1
+
+                if para_count >= chunk_size:
+                    results.append(
+                        finalize_part(current_doc, part_index, current_title, base_name)
+                    )
+                    part_index += 1
+                    current_doc = create_new_doc()
+                    current_title = ""
+                    para_count = 0
+
+        # Save remaining
+        if count_paragraphs(current_doc) > 0:
+            results.append(
+                finalize_part(current_doc, part_index, current_title, base_name)
+            )
+
+    # ────────────────────────────────────────────────
+    # MODE 4: Split by range (extract specific pages)
+    # ────────────────────────────────────────────────
+    elif split_by == "range":
+        if not pages:
+            raise ValueError(
+                '"pages" is required for range mode. '
+                "e.g. [[1,3], [4,6]] or [1, 3, 5]"
+            )
+
+        # ── Collect all elements with page numbers ─
+        all_elements = []
+        current_page = 1
+
+        for element in doc.element.body:
+            tag = element.tag.split("}")[-1]
+            if tag == "sectPr":
+                continue
+
+            all_elements.append(
+                {
+                    "element": element,
+                    "page": current_page,
+                }
+            )
+
+            if is_page_break(element):
+                current_page += 1
+
+        total_pages = current_page
+
+        # ── Normalize ranges ───────────────────────
+        normalized = []
+        for r in pages:
+            if isinstance(r, (int, float)):
+                p = int(r)
+                normalized.append((p, p))
+            elif isinstance(r, (list, tuple)) and len(r) == 2:
+                normalized.append((int(r[0]), int(r[1])))
+            else:
+                raise ValueError(
+                    f"Invalid range: {r}. " f"Use integers or [start, end] pairs."
+                )
+
+        # ── Extract each range ─────────────────────
+        for range_idx, (start, end) in enumerate(normalized, start=1):
+            if start < 1:
+                start = 1
+            if end > total_pages:
+                end = total_pages
+            if start > end:
+                raise ValueError(
+                    f"Invalid range: [{start}, {end}]. " f"Start must be <= end."
+                )
+
+            range_doc = create_new_doc()
+            range_title = f"Pages {start}-{end}"
+
+            for item in all_elements:
+                if start <= item["page"] <= end:
+                    append_element(range_doc, item["element"])
+
+            if count_paragraphs(range_doc) > 0 or len(range_doc.element.body) > 0:
+                results.append(
+                    finalize_part(range_doc, range_idx, range_title, base_name)
+                )
+
+    if not results:
+        raise ValueError(
+            "No content found to split. "
+            "The document may be empty or the split criteria found nothing."
+        )
+
+    return results
+
+
+
+
+
+

@@ -50,7 +50,9 @@ urlpatterns = [
     path('tools/hash-compare',            HashCompareView.as_view(),        name='hash-compare'),
     path('tools/file-checksum',           FileChecksumView.as_view(),       name='file-checksum'),
     path('tools/word-to-jpg',           WordToJPGView.as_view(),          name='word-to-jpg'),
-
+    path('tools/word-to-txt',           WordToTXTView.as_view(),          name='word-to-txt'),
+    path('tools/txt-to-word',           TXTToWordView.as_view(),          name='txt-to-word'),
+    path('tools/merge-docx',              MergeDOCXView.as_view(),          name='merge-docx'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

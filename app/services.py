@@ -4584,3 +4584,798 @@ def word_to_jpg(
 
     doc.close()
     return results
+
+
+def word_to_txt(
+    source,
+    filename: str = "document.docx",
+    include_headers: bool = True,
+    include_tables: bool = True,
+    include_comments: bool = False,
+    preserve_spacing: bool = True,
+    page_separator: str = "",
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Extract text from Word (.docx) → plain text.
+
+    Args:
+        source           : uploaded file object OR raw bytes
+        filename         : original filename
+        include_headers  : include heading markers    (default: True)
+        include_tables   : include table content      (default: True)
+        include_comments : include comments           (default: False)
+        preserve_spacing : preserve paragraph spacing (default: True)
+        page_separator   : separator between sections (default: '')
+        encoding         : output encoding            (default: utf-8)
+
+    Returns:
+        {
+            'text'         : str,
+            'paragraphs'   : int,
+            'words'        : int,
+            'chars'        : int,
+            'tables'       : int,
+            'headings'     : int,
+            'size_original': int,
+            'size_text'    : int,
+        }
+    """
+    from docx import Document as DocxDocument
+    from docx.text.paragraph import Paragraph as DocxPara
+    from docx.table import Table as DocxTable
+    from docx.oxml.ns import qn
+
+    # ── Read file bytes ────────────────────────────
+    if hasattr(source, "read"):
+        file_bytes = source.read()
+    else:
+        file_bytes = source
+
+    if not file_bytes:
+        raise ValueError("Empty file.")
+
+    original_size = len(file_bytes)
+
+    # ── Open document ─────────────────────────────
+    try:
+        doc = DocxDocument(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise ValueError(f"Cannot open Word document: {e}")
+
+    # ── Extract content ───────────────────────────
+    lines = []
+    para_count = 0
+    table_count = 0
+    heading_count = 0
+
+    # ── Heading markers ────────────────────────────
+    heading_markers = {
+        "Heading 1": "=",
+        "Heading 2": "-",
+        "Heading 3": "~",
+        "Heading 4": "+",
+        "Title": "#",
+        "Subtitle": "*",
+    }
+
+    def process_paragraph(para) -> str:
+        """Extract text from paragraph with style info."""
+        nonlocal para_count, heading_count
+
+        text = para.text.strip()
+        if not text:
+            return ""
+
+        style_name = para.style.name if para.style else "Normal"
+
+        # ── Heading detection ──────────────────────
+        if include_headers and any(h in style_name for h in heading_markers):
+            heading_count += 1
+            marker = next(
+                (v for k, v in heading_markers.items() if k in style_name), ""
+            )
+            if marker:
+                underline = marker * len(text)
+                return f"{text}\n{underline}"
+
+        para_count += 1
+        return text
+
+    def process_table(table) -> str:
+        """Extract text from table as formatted text."""
+        nonlocal table_count
+        table_count += 1
+
+        rows_text = []
+        col_widths = []
+
+        # ── Collect all cell texts ─────────────────
+        rows_data = []
+        for row in table.rows:
+            row_data = []
+            for cell in row.cells:
+                cell_text = " ".join(
+                    p.text.strip() for p in cell.paragraphs if p.text.strip()
+                )
+                row_data.append(cell_text)
+            rows_data.append(row_data)
+
+        if not rows_data:
+            return ""
+
+        # ── Calculate column widths ────────────────
+        num_cols = max(len(row) for row in rows_data)
+        col_widths = [0] * num_cols
+
+        for row in rows_data:
+            for i, cell in enumerate(row):
+                if i < num_cols:
+                    col_widths[i] = max(col_widths[i], len(cell))
+
+        # ── Build table text ───────────────────────
+        def format_row(row_data):
+            cells = []
+            for i in range(num_cols):
+                cell = row_data[i] if i < len(row_data) else ""
+                cells.append(cell.ljust(col_widths[i]))
+            return "| " + " | ".join(cells) + " |"
+
+        separator = "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
+
+        table_lines = [separator]
+        for r_idx, row in enumerate(rows_data):
+            table_lines.append(format_row(row))
+            if r_idx == 0:
+                table_lines.append(separator)  # header separator
+        table_lines.append(separator)
+
+        return "\n".join(table_lines)
+
+    # ── Process document elements ──────────────────
+    for element in doc.element.body:
+        tag = element.tag.split("}")[-1]
+
+        if tag == "p":
+            para = DocxPara(element, doc)
+            text = process_paragraph(para)
+            if text:
+                lines.append(text)
+                if preserve_spacing:
+                    lines.append("")
+
+        elif tag == "tbl":
+            if include_tables:
+                table = DocxTable(element, doc)
+                table_text = process_table(table)
+                if table_text:
+                    if preserve_spacing:
+                        lines.append("")
+                    lines.append(table_text)
+                    if preserve_spacing:
+                        lines.append("")
+
+        elif tag == "sectPr":
+            if page_separator:
+                lines.append(page_separator)
+
+    # ── Extract comments if requested ─────────────
+    if include_comments:
+        try:
+            comments_part = doc.part.comments_part
+            if comments_part:
+                lines.append("\n\n--- COMMENTS ---")
+                for comment in comments_part.element.findall(".//" + qn("w:comment")):
+                    author = comment.get(qn("w:author"), "Unknown")
+                    date = comment.get(qn("w:date"), "")[:10]
+                    comment_text = "".join(
+                        t.text or "" for t in comment.findall(".//" + qn("w:t"))
+                    )
+                    lines.append(f"[{author} - {date}]: {comment_text}")
+        except Exception:
+            pass  # Comments not available
+
+    # ── Join all lines ─────────────────────────────
+    full_text = "\n".join(lines).strip()
+
+    # ── Remove excessive blank lines ───────────────
+    import re
+
+    full_text = re.sub(r"\n{3,}", "\n\n", full_text)
+
+    # ── Stats ──────────────────────────────────────
+    word_count = len(full_text.split()) if full_text else 0
+    char_count = len(full_text)
+
+    return {
+        "text": full_text,
+        "paragraphs": para_count,
+        "words": word_count,
+        "chars": char_count,
+        "tables": table_count,
+        "headings": heading_count,
+        "size_original": original_size,
+        "size_original_kb": round(original_size / 1024, 2),
+        "size_text": len(full_text.encode(encoding)),
+        "size_text_kb": round(len(full_text.encode(encoding)) / 1024, 2),
+        "encoding": encoding,
+    }
+
+
+def txt_to_word(
+    source,
+    filename: str = "document.txt",
+    title: str = "",
+    font_name: str = "Calibri",
+    font_size: int = 11,
+    line_spacing: float = 1.15,
+    detect_headings: bool = True,
+    detect_lists: bool = True,
+    detect_tables: bool = True,
+    page_size: str = "A4",
+    encoding: str = "utf-8",
+) -> bytes:
+    """
+    Convert plain text (.txt) → Word (.docx).
+
+    Args:
+        source          : uploaded file object | raw text string | bytes
+        filename        : original filename
+        title           : document title (metadata)
+        font_name       : body font                  (default: Calibri)
+        font_size       : body font size pt          (default: 11)
+        line_spacing    : line spacing multiplier    (default: 1.15)
+        detect_headings : auto-detect headings       (default: True)
+        detect_lists    : auto-detect bullet lists   (default: True)
+        detect_tables   : auto-detect ASCII tables   (default: True)
+        page_size       : A4 | Letter                (default: A4)
+        encoding        : input text encoding        (default: utf-8)
+
+    Heading detection rules:
+        - ALL CAPS short lines           → Heading 1
+        - Lines ending with ===          → Heading 1
+        - Lines ending with ---          → Heading 2
+        - Lines ending with ~~~          → Heading 3
+        - Lines starting with # ## ###  → Heading 1/2/3
+        - Short lines followed by ===   → Heading 1
+        - Short lines followed by ---   → Heading 2
+
+    List detection rules:
+        - Lines starting with - * + •   → Bullet list
+        - Lines starting with 1. 2. 3.  → Numbered list
+
+    Table detection rules:
+        - Lines starting with |         → Table row
+        - Lines starting with +---      → Table separator (skip)
+
+    Returns:
+        Raw bytes of the generated .docx file
+    """
+    from docx import Document
+    from docx.shared import Pt, Inches, RGBColor
+    from docx.oxml.ns import qn
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+    elif isinstance(source, str):
+        raw = source
+    else:
+        raise ValueError("source must be a string, bytes, or file object.")
+
+    if not raw.strip():
+        raise ValueError("Empty input. Nothing to convert.")
+
+    # ── Page size ─────────────────────────────────
+    from docx.shared import Inches
+
+    page_sizes = {
+        "A4": (Inches(8.27), Inches(11.69)),
+        "Letter": (Inches(8.5), Inches(11.0)),
+        "Legal": (Inches(8.5), Inches(14.0)),
+        "A3": (Inches(11.69), Inches(16.54)),
+    }
+    if page_size not in page_sizes:
+        page_size = "A4"
+    page_w, page_h = page_sizes[page_size]
+
+    # ── Create document ───────────────────────────
+    doc = Document()
+
+    # ── Page setup ────────────────────────────────
+    section = doc.sections[0]
+    section.page_width = page_w
+    section.page_height = page_h
+    section.left_margin = Inches(1)
+    section.right_margin = Inches(1)
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+
+    # ── Document metadata ─────────────────────────
+    core_props = doc.core_properties
+    core_props.title = title or filename.replace(".txt", "")
+    core_props.author = "Text to Word Converter"
+    core_props.subject = "Converted from plain text"
+
+    # ── Default style ─────────────────────────────
+    style = doc.styles["Normal"]
+    style.font.name = font_name
+    style.font.size = Pt(font_size)
+
+    from docx.oxml import OxmlElement
+    from lxml import etree
+
+    def set_line_spacing(paragraph, spacing=1.15):
+        pPr = paragraph._p.get_or_add_pPr()
+        spacing_el = OxmlElement("w:spacing")
+        spacing_el.set(qn("w:line"), str(int(spacing * 240)))
+        spacing_el.set(qn("w:lineRule"), "auto")
+        pPr.append(spacing_el)
+
+    # ── Heading styles ─────────────────────────────
+    heading_colors = {
+        1: RGBColor(0x2E, 0x75, 0xB6),  # blue
+        2: RGBColor(0x2E, 0x75, 0xB6),  # blue
+        3: RGBColor(0x1F, 0x4E, 0x79),  # dark blue
+    }
+
+    def add_heading(text, level=1):
+        p = doc.add_heading(text.strip(), level=level)
+        for run in p.runs:
+            run.font.color.rgb = heading_colors.get(level, RGBColor(0, 0, 0))
+        return p
+
+    def add_paragraph(text, bold=False, italic=False, align=None):
+        p = doc.add_paragraph()
+        run = p.add_run(text)
+        run.font.name = font_name
+        run.font.size = Pt(font_size)
+        run.bold = bold
+        run.italic = italic
+        if align:
+            p.alignment = align
+        set_line_spacing(p, line_spacing)
+        return p
+
+    def add_bullet(text, numbered=False, num=1):
+        if numbered:
+            p = doc.add_paragraph(
+                text.strip(),
+                style="List Number",
+            )
+        else:
+            p = doc.add_paragraph(
+                text.strip(),
+                style="List Bullet",
+            )
+        for run in p.runs:
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+        return p
+
+    def add_table_from_rows(table_rows):
+        """Convert ASCII table rows → Word table."""
+        # Parse rows
+        data = []
+        for row in table_rows:
+            row = row.strip()
+            if row.startswith("+") or set(row.strip()) <= {"+", "-", "="}:
+                continue  # skip separator rows
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            if cells:
+                data.append(cells)
+
+        if not data:
+            return
+
+        num_cols = max(len(row) for row in data)
+        num_rows = len(data)
+
+        tbl = doc.add_table(rows=num_rows, cols=num_cols)
+        tbl.style = "Table Grid"
+
+        from docx.shared import RGBColor
+        from docx.oxml import OxmlElement
+
+        for r_idx, row_data in enumerate(data):
+            row = tbl.rows[r_idx]
+            for c_idx in range(num_cols):
+                cell = row.cells[c_idx]
+                text = row_data[c_idx] if c_idx < len(row_data) else ""
+                cell.text = text
+
+                # Style header row
+                if r_idx == 0:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.bold = True
+                            run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                        # Blue background
+                        tc = cell._tc
+                        tcPr = tc.get_or_add_tcPr()
+                        shd = OxmlElement("w:shd")
+                        shd.set(qn("w:fill"), "2E75B6")
+                        shd.set(qn("w:color"), "auto")
+                        shd.set(qn("w:val"), "clear")
+                        tcPr.append(shd)
+                else:
+                    # Alternating rows
+                    if r_idx % 2 == 0:
+                        tc = cell._tc
+                        tcPr = tc.get_or_add_tcPr()
+                        shd = OxmlElement("w:shd")
+                        shd.set(qn("w:fill"), "DCE6F1")
+                        shd.set(qn("w:color"), "auto")
+                        shd.set(qn("w:val"), "clear")
+                        tcPr.append(shd)
+
+        doc.add_paragraph()  # spacing after table
+
+    # ── Parse lines ───────────────────────────────
+    lines = raw.splitlines()
+    i = 0
+    total_lines = len(lines)
+
+    # Add title if provided
+    if title:
+        add_heading(title, level=1)
+        doc.add_paragraph()
+
+    while i < total_lines:
+        line = lines[i]
+        stripped = line.strip()
+
+        # ── Empty line ─────────────────────────────
+        if not stripped:
+            i += 1
+            continue
+
+        # ── Markdown headings # ## ### ─────────────
+        if detect_headings and stripped.startswith("#"):
+            level = min(len(stripped) - len(stripped.lstrip("#")), 3)
+            text = stripped.lstrip("#").strip()
+            if text:
+                add_heading(text, level=level)
+                i += 1
+                continue
+
+        # ── Underline-style headings ──────────────
+        # Check next line for === or ---
+        if detect_headings and i + 1 < total_lines:
+            next_line = lines[i + 1].strip()
+            if next_line and len(next_line) >= 3:
+                if set(next_line) == {"="}:
+                    add_heading(stripped, level=1)
+                    i += 2
+                    continue
+                if set(next_line) == {"-"}:
+                    add_heading(stripped, level=2)
+                    i += 2
+                    continue
+                if set(next_line) == {"~"}:
+                    add_heading(stripped, level=3)
+                    i += 2
+                    continue
+
+        # ── ALL CAPS heading ──────────────────────
+        if detect_headings:
+            if (
+                stripped.isupper()
+                and len(stripped) > 3
+                and len(stripped) < 80
+                and not stripped.startswith("|")
+            ):
+                add_heading(stripped, level=1)
+                i += 1
+                continue
+
+        # ── Inline === / --- heading markers ───────
+        if detect_headings:
+            if re.match(r"^={3,}$", stripped):
+                i += 1
+                continue
+            if re.match(r"^-{3,}$", stripped):
+                i += 1
+                continue
+
+        # ── ASCII table ───────────────────────────
+        if detect_tables and (stripped.startswith("|") or stripped.startswith("+")):
+            # Collect all consecutive table lines
+            table_rows = []
+            while i < total_lines and (
+                lines[i].strip().startswith("|") or lines[i].strip().startswith("+")
+            ):
+                table_rows.append(lines[i])
+                i += 1
+
+            add_table_from_rows(table_rows)
+            continue
+
+        # ── Bullet list ───────────────────────────
+        if detect_lists and re.match(r"^[-*+•]\s+", stripped):
+            text = re.sub(r"^[-*+•]\s+", "", stripped)
+            add_bullet(text, numbered=False)
+            i += 1
+            continue
+
+        # ── Numbered list ─────────────────────────
+        if detect_lists and re.match(r"^\d+[.)]\s+", stripped):
+            text = re.sub(r"^\d+[.)]\s+", "", stripped)
+            add_bullet(text, numbered=True)
+            i += 1
+            continue
+
+        # ── Horizontal rule ───────────────────────
+        if re.match(r"^[=\-_*]{3,}$", stripped):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(6)
+            p.paragraph_format.space_after = Pt(6)
+            from docx.oxml import OxmlElement
+
+            pPr = p._p.get_or_add_pPr()
+            pBdr = OxmlElement("w:pBdr")
+            bottom = OxmlElement("w:bottom")
+            bottom.set(qn("w:val"), "single")
+            bottom.set(qn("w:sz"), "6")
+            bottom.set(qn("w:space"), "1")
+            bottom.set(qn("w:color"), "2E75B6")
+            pBdr.append(bottom)
+            pPr.append(pBdr)
+            i += 1
+            continue
+
+        # ── Regular paragraph ─────────────────────
+        add_paragraph(stripped)
+        i += 1
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def merge_docx(
+    sources: list,
+    page_break: bool = True,
+    add_toc: bool = False,
+    preserve_styles: bool = True,
+    separator_text: str = "",
+) -> bytes:
+    """
+    Merge multiple Word (.docx) files into one document.
+
+    Args:
+        sources         : list of file objects OR bytes OR paths
+        page_break      : add page break between documents   (default: True)
+        add_toc         : add table of contents              (default: False)
+        preserve_styles : preserve each doc's styles         (default: True)
+        separator_text  : text to insert between documents   (default: '')
+
+    Returns:
+        Raw bytes of the merged .docx file
+    """
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    import copy
+
+    if not sources:
+        raise ValueError("No files provided to merge.")
+
+    if len(sources) < 2:
+        raise ValueError("At least 2 files are required to merge.")
+
+    if len(sources) > 20:
+        raise ValueError("Maximum 20 files can be merged at once.")
+
+    # ── Read all documents ─────────────────────────
+    documents = []
+    for i, source in enumerate(sources):
+        try:
+            if hasattr(source, "read"):
+                data = source.read()
+            elif isinstance(source, bytes):
+                data = source
+            else:
+                raise ValueError(f"Invalid source type at index {i}.")
+
+            doc = Document(io.BytesIO(data))
+            documents.append(
+                {
+                    "doc": doc,
+                    "filename": getattr(source, "name", f"document_{i+1}.docx"),
+                    "index": i,
+                }
+            )
+        except Exception as e:
+            raise ValueError(f"Cannot open file {i+1}: {e}")
+
+    # ── Use first document as base ─────────────────
+    merged = documents[0]["doc"]
+    base_name = documents[0]["filename"]
+
+    def add_page_break(doc):
+        """Add page break to document."""
+        para = doc.add_paragraph()
+        run = para.add_run()
+        run.add_break(
+            __import__("docx.enum.text", fromlist=["WD_BREAK_TYPE"]).WD_BREAK_TYPE.PAGE
+        )
+
+    def add_separator(doc, text: str):
+        """Add separator text between documents."""
+        if not text:
+            return
+        para = doc.add_paragraph()
+        run = para.add_run(text)
+        run.bold = True
+        run.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # Add horizontal line above
+        pPr = para._p.get_or_add_pPr()
+        pBdr = OxmlElement("w:pBdr")
+        top = OxmlElement("w:top")
+        top.set(qn("w:val"), "single")
+        top.set(qn("w:sz"), "6")
+        top.set(qn("w:space"), "1")
+        top.set(qn("w:color"), "2E75B6")
+        pBdr.append(top)
+        pPr.append(pBdr)
+
+    def copy_element(element):
+        """Deep copy an XML element."""
+        return copy.deepcopy(element)
+
+    def append_document(base_doc, src_doc, filename: str, index: int):
+        """Append all content from src_doc into base_doc."""
+
+        # ── Add separator if specified ─────────────
+        if separator_text:
+            add_separator(
+                base_doc,
+                separator_text.replace("{n}", str(index + 1)).replace(
+                    "{filename}", filename
+                ),
+            )
+
+        # ── Add page break between docs ────────────
+        if page_break and index > 0:
+            # Add page break to last paragraph of base
+            if base_doc.paragraphs:
+                last_para = base_doc.paragraphs[-1]
+                run = last_para.add_run()
+                br = OxmlElement("w:br")
+                br.set(qn("w:type"), "page")
+                run._r.append(br)
+            else:
+                add_page_break(base_doc)
+
+        # ── Copy styles from source ────────────────
+        if preserve_styles:
+            _copy_styles(base_doc, src_doc)
+
+        # ── Copy images / relationships ────────────
+        _copy_relationships(base_doc, src_doc)
+
+        # ── Copy body elements ─────────────────────
+        for element in src_doc.element.body:
+            tag = element.tag.split("}")[-1]
+
+            # Skip section properties (sectPr) — keep base doc's layout
+            if tag == "sectPr":
+                continue
+
+            # Deep copy element and append to base body
+            new_element = copy_element(element)
+            base_doc.element.body.append(new_element)
+
+    def _copy_styles(base_doc, src_doc):
+        """Copy missing styles from src_doc to base_doc."""
+        base_style_names = {s.name for s in base_doc.styles}
+
+        for style in src_doc.styles:
+            if style.name not in base_style_names:
+                try:
+                    new_style = copy_element(style.element)
+                    base_doc.styles.element.append(new_style)
+                except Exception:
+                    pass  # Skip problematic styles
+
+    def _copy_relationships(base_doc, src_doc):
+        """Copy image relationships from src to base."""
+        try:
+            src_part = src_doc.part
+            base_part = base_doc.part
+
+            for rel in src_part.rels.values():
+                if "image" in rel.reltype:
+                    try:
+                        # Get image blob from source
+                        img_part = rel.target_part
+                        img_bytes = img_part.blob
+                        img_ct = img_part.content_type
+
+                        # Add to base document
+                        base_part.relate_to(
+                            img_part,
+                            rel.reltype,
+                        )
+                    except Exception:
+                        pass  # Skip problematic images
+        except Exception:
+            pass
+
+    # ── Merge all documents ────────────────────────
+    for i in range(1, len(documents)):
+        append_document(
+            merged,
+            documents[i]["doc"],
+            documents[i]["filename"],
+            i,
+        )
+
+    # ── Add TOC if requested ───────────────────────
+    if add_toc:
+        _add_toc(merged)
+
+    # ── Update metadata ────────────────────────────
+    merged.core_properties.title = f"Merged Document ({len(documents)} files)"
+    merged.core_properties.author = "Merge DOCX Service"
+    merged.core_properties.subject = ", ".join(d["filename"] for d in documents)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    merged.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def _add_toc(doc):
+    """
+    Add a basic Table of Contents field to the beginning of the document.
+    Note: TOC requires Word to refresh on open (F9).
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    # Insert TOC at beginning
+    toc_para = doc.paragraphs[0]._p if doc.paragraphs else None
+
+    # Add TOC heading
+    toc_heading = doc.add_heading("Table of Contents", level=1)
+
+    # Move heading to beginning
+    doc.element.body.insert(0, toc_heading._p)
+
+    # Add TOC field
+    para = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    fldChar = OxmlElement("w:fldChar")
+    fldChar.set(qn("w:fldCharType"), "begin")
+    run.append(fldChar)
+    para.append(run)
+
+    run2 = OxmlElement("w:r")
+    instrText = OxmlElement("w:instrText")
+    instrText.text = ' TOC \\o "1-3" \\h \\z \\u '
+    run2.append(instrText)
+    para.append(run2)
+
+    run3 = OxmlElement("w:r")
+    fldChar2 = OxmlElement("w:fldChar")
+    fldChar2.set(qn("w:fldCharType"), "end")
+    run3.append(fldChar2)
+    para.append(run3)
+
+    doc.element.body.insert(1, para)

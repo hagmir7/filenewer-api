@@ -3225,8 +3225,6 @@ class FileChecksumView(APIView):
         )
 
 
-
-
 class WordToJPGView(APIView):
     """
     POST /api/convert/word-to-jpg/
@@ -3402,3 +3400,389 @@ class WordToJPGView(APIView):
                     "pages": data,
                 }
             )
+
+
+class WordToTXTView(APIView):
+    """
+    POST /api/convert/word-to-txt/
+    Upload a Word file (.docx/.doc) → returns plain text.
+
+    Form fields:
+        file             : Word file (.docx / .doc)    (required)
+        include_headers  : true | false                (default: true)
+        include_tables   : true | false                (default: true)
+        include_comments : true | false                (default: false)
+        preserve_spacing : true | false                (default: true)
+        page_separator   : separator string            (default: empty)
+        encoding         : utf-8 | ascii | latin-1     (default: utf-8)
+        output           : json | file                 (default: json)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        include_headers = request.data.get("include_headers", "true")
+        include_tables = request.data.get("include_tables", "true")
+        include_comments = request.data.get("include_comments", "false")
+        preserve_spacing = request.data.get("preserve_spacing", "true")
+        page_separator = request.data.get("page_separator", "")
+        encoding = request.data.get("encoding", "utf-8")
+        output = request.data.get("output", "json")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        if not file.name.lower().endswith((".docx", ".doc")):
+            return Response(
+                {"error": "Only .docx or .doc files are accepted."},
+                status=400,
+            )
+
+        if output not in ("json", "file"):
+            return Response(
+                {"error": "output must be: json or file."},
+                status=400,
+            )
+
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse booleans ────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_headers = to_bool(include_headers)
+        include_tables = to_bool(include_tables)
+        include_comments = to_bool(include_comments)
+        preserve_spacing = to_bool(preserve_spacing)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = word_to_txt(
+                file,
+                filename=file.name,
+                include_headers=include_headers,
+                include_tables=include_tables,
+                include_comments=include_comments,
+                preserve_spacing=preserve_spacing,
+                page_separator=page_separator,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output: file download ──────────────────
+        if output == "file":
+            txt_filename = (
+                file.name.replace(".docx", ".txt")
+                .replace(".doc", ".txt")
+                .replace(".DOCX", ".txt")
+                .replace(".DOC", ".txt")
+            )
+
+            response = HttpResponse(
+                result["text"].encode(encoding),
+                content_type=f"text/plain; charset={encoding}",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{txt_filename}"'
+            response["Content-Length"] = result["size_text"]
+            response["X-Word-Count"] = result["words"]
+            response["X-Char-Count"] = result["chars"]
+            response["X-Paragraph-Count"] = result["paragraphs"]
+            response["X-Table-Count"] = result["tables"]
+            response["X-Heading-Count"] = result["headings"]
+            return response
+
+        # ── Output: JSON response ──────────────────
+        return Response(
+            {
+                "text": result["text"],
+                "paragraphs": result["paragraphs"],
+                "words": result["words"],
+                "chars": result["chars"],
+                "tables": result["tables"],
+                "headings": result["headings"],
+                "size_original_kb": result["size_original_kb"],
+                "size_text_kb": result["size_text_kb"],
+                "encoding": result["encoding"],
+            }
+        )
+
+
+class TXTToWordView(APIView):
+    """
+    POST /api/convert/txt-to-word/
+    Upload .txt file or send raw text → returns .docx file.
+
+    Form fields (file upload):
+        file            : .txt file                          (required)
+        title           : document title                    (optional)
+        font_name       : Calibri|Arial|Times New Roman     (default: Calibri)
+        font_size       : font size in pt                   (default: 11)
+        line_spacing    : 1.0 | 1.15 | 1.5 | 2.0          (default: 1.15)
+        detect_headings : true | false                      (default: true)
+        detect_lists    : true | false                      (default: true)
+        detect_tables   : true | false                      (default: true)
+        page_size       : A4 | Letter | Legal | A3          (default: A4)
+        encoding        : utf-8 | ascii | latin-1           (default: utf-8)
+        output_filename : custom output filename            (optional)
+
+    JSON body (raw text):
+        {
+            "text"           : "Your plain text here...",
+            "title"          : "My Document",
+            "font_name"      : "Calibri",
+            "font_size"      : 11,
+            "line_spacing"   : 1.15,
+            "detect_headings": true,
+            "detect_lists"   : true,
+            "detect_tables"  : true,
+            "page_size"      : "A4"
+        }
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file", None)
+        text = request.data.get("text", None)
+        title = request.data.get("title", "")
+        font_name = request.data.get("font_name", "Calibri")
+        font_size = request.data.get("font_size", 11)
+        line_spacing = request.data.get("line_spacing", 1.15)
+        detect_headings = request.data.get("detect_headings", True)
+        detect_lists = request.data.get("detect_lists", True)
+        detect_tables = request.data.get("detect_tables", True)
+        page_size = request.data.get("page_size", "A4")
+        encoding = request.data.get("encoding", "utf-8")
+        output_filename = request.data.get("output_filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file and text is None:
+            return Response(
+                {"error": 'Provide either "file" (.txt) or "text" (raw string).'},
+                status=400,
+            )
+
+        if file and not file.name.lower().endswith((".txt", ".text", ".md")):
+            return Response(
+                {"error": "Only .txt, .text, or .md files are accepted."},
+                status=400,
+            )
+
+        # ── Parse types ───────────────────────────
+        try:
+            font_size = int(font_size)
+            line_spacing = float(line_spacing)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "font_size must be integer, line_spacing must be float."},
+                status=400,
+            )
+
+        if not (6 <= font_size <= 72):
+            return Response(
+                {"error": "font_size must be between 6 and 72."},
+                status=400,
+            )
+
+        if not (1.0 <= line_spacing <= 3.0):
+            return Response(
+                {"error": "line_spacing must be between 1.0 and 3.0."},
+                status=400,
+            )
+
+        valid_fonts = (
+            "Calibri",
+            "Arial",
+            "Times New Roman",
+            "Georgia",
+            "Verdana",
+            "Helvetica",
+            "Courier New",
+            "Tahoma",
+            "Trebuchet MS",
+        )
+        if font_name not in valid_fonts:
+            return Response(
+                {"error": f'font_name must be one of: {", ".join(valid_fonts)}'},
+                status=400,
+            )
+
+        if page_size not in ("A4", "Letter", "Legal", "A3"):
+            return Response(
+                {"error": "page_size must be: A4, Letter, Legal, or A3."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        detect_headings = to_bool(detect_headings)
+        detect_lists = to_bool(detect_lists)
+        detect_tables = to_bool(detect_tables)
+
+        # ── Source + filename ──────────────────────
+        source = file if file else str(text)
+        src_name = file.name if file else "document.txt"
+
+        if not output_filename:
+            output_filename = (
+                src_name.replace(".txt", ".docx")
+                .replace(".text", ".docx")
+                .replace(".md", ".docx")
+            )
+        if not output_filename.endswith(".docx"):
+            output_filename += ".docx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            docx_bytes = txt_to_word(
+                source,
+                filename=src_name,
+                title=str(title),
+                font_name=font_name,
+                font_size=font_size,
+                line_spacing=line_spacing,
+                detect_headings=detect_headings,
+                detect_lists=detect_lists,
+                detect_tables=detect_tables,
+                page_size=page_size,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return .docx download ──────────────────
+        response = HttpResponse(
+            docx_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".wordprocessingml.document"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(docx_bytes)
+        return response
+
+
+
+
+class MergeDOCXView(APIView):
+    """
+    POST /api/tools/merge-docx/
+    Upload 2-20 Word files → returns merged .docx file.
+
+    Form fields:
+        files[]         : multiple .docx files              (required, min 2)
+        page_break      : true | false                      (default: true)
+        add_toc         : true | false                      (default: false)
+        preserve_styles : true | false                      (default: true)
+        separator_text  : text between docs                 (optional)
+                          use {n} for doc number
+                          use {filename} for filename
+        output_filename : custom output filename            (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        files = request.FILES.getlist("files[]")
+        page_break = request.data.get("page_break", "true")
+        add_toc = request.data.get("add_toc", "false")
+        preserve_styles = request.data.get("preserve_styles", "true")
+        separator_text = request.data.get("separator_text", "")
+        output_filename = request.data.get("output_filename", "merged.docx")
+
+        # ── Also support files without [] ──────────
+        if not files:
+            files = request.FILES.getlist("files")
+
+        # ── Validate ──────────────────────────────
+        if not files:
+            return Response(
+                {"error": "No files provided. Use files[] field with multiple files."},
+                status=400,
+            )
+
+        if len(files) < 2:
+            return Response(
+                {"error": "At least 2 files are required to merge."},
+                status=400,
+            )
+
+        if len(files) > 20:
+            return Response(
+                {"error": "Maximum 20 files can be merged at once."},
+                status=400,
+            )
+
+        # ── Validate file types ────────────────────
+        for f in files:
+            if not f.name.lower().endswith((".docx", ".doc")):
+                return Response(
+                    {"error": f'"{f.name}" is not a .docx or .doc file.'},
+                    status=400,
+                )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        page_break = to_bool(page_break)
+        add_toc = to_bool(add_toc)
+        preserve_styles = to_bool(preserve_styles)
+
+        # ── Output filename ───────────────────────
+        if not output_filename.endswith(".docx"):
+            output_filename += ".docx"
+
+        # ── Merge ─────────────────────────────────
+        try:
+            merged_bytes = merge_docx(
+                sources=files,
+                page_break=page_break,
+                add_toc=add_toc,
+                preserve_styles=preserve_styles,
+                separator_text=separator_text,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return merged file ─────────────────────
+        response = HttpResponse(
+            merged_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".wordprocessingml.document"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(merged_bytes)
+        response["X-Files-Merged"] = len(files)
+        response["X-File-Names"] = ", ".join(f.name for f in files)
+        return response

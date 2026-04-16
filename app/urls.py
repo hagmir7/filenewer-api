@@ -23,9 +23,9 @@ urlpatterns = [
      path('tools/pdf-compress',             CompressPDFView.as_view(),     name='pdf-compress'),
      path('tools/pdf-to-png',          PDFToPNGView.as_view(),        name='pdf-to-png'),
     path("tools/pdf-info", PDFInfoView.as_view(), name="pdf-info"),
-    path('tools/pdf-rotate',               RotatePDFView.as_view(),       name='pdf-rotate'),   # ← ✅
-    path('tools/pdf-pages',                PDFPageInfoView.as_view(),     name='pdf-pages'),    # ← ✅
-    path('tools/pdf-watermark',            WatermarkPDFView.as_view(),    name='pdf-watermark'),  # ← add
+    path('tools/pdf-rotate',               RotatePDFView.as_view(),       name='pdf-rotate'),
+    path('tools/pdf-pages',                PDFPageInfoView.as_view(),     name='pdf-pages'), 
+    path('tools/pdf-watermark',            WatermarkPDFView.as_view(),    name='pdf-watermark'),
     path('tools/format-json-file',         JSONFileFormatterView.as_view(), name='json-file-formatter'),
     path('tools/format-json-text',         JSONTextFormatterView.as_view(), name='json-text-formatter'),
     path('tools/ocr-pdf',             OCRPDFView.as_view(),       name='pdf-compress'),
@@ -53,7 +53,9 @@ urlpatterns = [
     path('tools/word-to-txt',           WordToTXTView.as_view(),          name='word-to-txt'),
     path('tools/txt-to-word',           TXTToWordView.as_view(),          name='txt-to-word'),
     path('tools/merge-docx',              MergeDOCXView.as_view(),          name='merge-docx'),
-    path('tools/split-docx',              SplitDOCXView.as_view(),          name='split-docx'),  # ← add
+    path('tools/split-docx',              SplitDOCXView.as_view(),          name='split-docx'), 
+    path('tools/text-compare',    TextCompareView.as_view(),  name='text-compare'),
+    path('tools/file-compare',    FileCompareView.as_view(),  name='file-compare'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

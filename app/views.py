@@ -3786,8 +3786,6 @@ class MergeDOCXView(APIView):
         return response
 
 
-
-
 class SplitDOCXView(APIView):
     """
     POST /api/tools/split-docx/
@@ -3946,5 +3944,183 @@ class SplitDOCXView(APIView):
 
 
 
+class TextCompareView(APIView):
+    """
+    POST /api/tools/text-compare
+    Compare two raw text strings.
+
+    JSON body:
+        {
+            "text1"             : "original text...",
+            "text2"             : "modified text...",
+            "compare_mode"      : "line | word | char | sentence",
+            "ignore_case"       : false,
+            "ignore_whitespace" : false,
+            "ignore_blank_lines": false,
+            "context_lines"     : 3,
+            "output_format"     : "unified | html | json | side_by_side"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        text1 = request.data.get("text1")
+        text2 = request.data.get("text2")
+        compare_mode = request.data.get("compare_mode", "line")
+        ignore_case = request.data.get("ignore_case", False)
+        ignore_whitespace = request.data.get("ignore_whitespace", False)
+        ignore_blank_lines = request.data.get("ignore_blank_lines", False)
+        context_lines = request.data.get("context_lines", 3)
+        output_format = request.data.get("output_format", "unified")
+
+        # ── Validate ──────────────────────────────
+        if text1 is None or text2 is None:
+            return Response(
+                {"error": 'Both "text1" and "text2" are required.'},
+                status=400,
+            )
+
+        if compare_mode not in ("line", "word", "char", "sentence"):
+            return Response(
+                {"error": "compare_mode must be: line, word, char, or sentence."},
+                status=400,
+            )
+
+        if output_format not in ("unified", "html", "json", "side_by_side"):
+            return Response(
+                {
+                    "error": "output_format must be: unified, html, json, or side_by_side."
+                },
+                status=400,
+            )
+
+        # ── Parse types ───────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        ignore_case = to_bool(ignore_case)
+        ignore_whitespace = to_bool(ignore_whitespace)
+        ignore_blank_lines = to_bool(ignore_blank_lines)
+
+        try:
+            context_lines = int(context_lines)
+            if not (0 <= context_lines <= 10):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "context_lines must be an integer between 0 and 10."},
+                status=400,
+            )
+
+        # ── Compare ───────────────────────────────
+        try:
+            result = compare_texts(
+                str(text1),
+                str(text2),
+                compare_mode=compare_mode,
+                ignore_case=ignore_case,
+                ignore_whitespace=ignore_whitespace,
+                ignore_blank_lines=ignore_blank_lines,
+                context_lines=context_lines,
+                output_format=output_format,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
 
 
+class FileCompareView(APIView):
+    """
+    POST /api/tools/file-compare/
+    Upload two text files → returns comparison result.
+
+    Form fields:
+        file1              : first file  (original)    (required)
+        file2              : second file (modified)    (required)
+        compare_mode       : line | word | char | sentence  (default: line)
+        ignore_case        : true | false              (default: false)
+        ignore_whitespace  : true | false              (default: false)
+        ignore_blank_lines : true | false              (default: false)
+        context_lines      : 0-10                      (default: 3)
+        output_format      : unified | html | json | side_by_side (default: unified)
+        encoding           : utf-8 | ascii | latin-1   (default: utf-8)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file1 = request.FILES.get("file1")
+        file2 = request.FILES.get("file2")
+        compare_mode = request.data.get("compare_mode", "line")
+        ignore_case = request.data.get("ignore_case", "false")
+        ignore_whitespace = request.data.get("ignore_whitespace", "false")
+        ignore_blank_lines = request.data.get("ignore_blank_lines", "false")
+        context_lines = request.data.get("context_lines", "3")
+        output_format = request.data.get("output_format", "unified")
+        encoding = request.data.get("encoding", "utf-8")
+
+        # ── Validate ──────────────────────────────
+        if not file1 or not file2:
+            return Response(
+                {"error": 'Both "file1" and "file2" are required.'},
+                status=400,
+            )
+
+        if compare_mode not in ("line", "word", "char", "sentence"):
+            return Response(
+                {"error": "compare_mode must be: line, word, char, or sentence."},
+                status=400,
+            )
+
+        if output_format not in ("unified", "html", "json", "side_by_side"):
+            return Response(
+                {
+                    "error": "output_format must be: unified, html, json, or side_by_side."
+                },
+                status=400,
+            )
+
+        # ── Parse types ───────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        ignore_case = to_bool(ignore_case)
+        ignore_whitespace = to_bool(ignore_whitespace)
+        ignore_blank_lines = to_bool(ignore_blank_lines)
+
+        try:
+            context_lines = int(context_lines)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "context_lines must be an integer."},
+                status=400,
+            )
+
+        # ── Compare ───────────────────────────────
+        try:
+            result = compare_files(
+                file1,
+                file2,
+                encoding=encoding,
+                compare_mode=compare_mode,
+                ignore_case=ignore_case,
+                ignore_whitespace=ignore_whitespace,
+                output_format=output_format,
+                context_lines=context_lines,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)

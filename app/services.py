@@ -6523,3 +6523,220 @@ def split_pdf(
         raise ValueError("No content found to split.")
 
     return results
+
+
+def view_csv(
+    source,
+    separator: str = None,
+    encoding: str = "utf-8",
+    max_rows: int = 1000,
+    page: int = 1,
+    page_size: int = 100,
+    sort_by: str = None,
+    sort_order: str = "asc",
+    filter_column: str = None,
+    filter_value: str = None,
+    filter_operator: str = "contains",
+    columns: list = None,
+) -> dict:
+    """
+    Parse and view CSV file with pagination, sorting, and filtering.
+
+    Args:
+        source          : uploaded file object OR raw text string
+        separator       : column separator (None = auto-detect)
+        encoding        : file encoding                  (default: utf-8)
+        max_rows        : max rows to process            (default: 1000)
+        page            : page number (1-based)          (default: 1)
+        page_size       : rows per page                  (default: 100)
+        sort_by         : column name to sort by         (default: None)
+        sort_order      : 'asc' | 'desc'                 (default: asc)
+        filter_column   : column to filter on            (default: None)
+        filter_value    : value to filter by             (default: None)
+        filter_operator : 'contains' | 'equals'
+                          'starts_with' | 'ends_with'
+                          'greater_than' | 'less_than'
+                          'not_empty' | 'is_empty'       (default: contains)
+        columns         : list of columns to return      (default: all)
+
+    Returns:
+        {
+            'columns'      : list,
+            'rows'         : list,
+            'total_rows'   : int,
+            'total_columns': int,
+            'page'         : int,
+            'page_size'    : int,
+            'total_pages'  : int,
+            'stats'        : dict,
+        }
+    """
+    import math
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+    elif isinstance(source, str):
+        raw = source
+    else:
+        raise ValueError("source must be a string or file object.")
+
+    if not raw.strip():
+        raise ValueError("Empty input.")
+
+    # ── Parse CSV ────────────────────────────────
+    df = pd.read_csv(
+        io.StringIO(raw),
+        sep=separator,
+        engine="python",
+        nrows=max_rows,
+        dtype=str,  # keep everything as string for display
+        keep_default_na=False,  # don't convert empty to NaN
+    )
+
+    # ── Clean column names ─────────────────────────
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # ── Select columns ─────────────────────────────
+    if columns:
+        valid_cols = [c for c in columns if c in df.columns]
+        if valid_cols:
+            df = df[valid_cols]
+
+    total_rows = len(df)
+    total_columns = len(df.columns)
+    all_columns = list(df.columns)
+
+    # ── Apply filter ──────────────────────────────
+    if filter_column and filter_column in df.columns and filter_value is not None:
+        col = df[filter_column].astype(str)
+
+        if filter_operator == "contains":
+            df = df[col.str.contains(filter_value, case=False, na=False)]
+        elif filter_operator == "equals":
+            df = df[col.str.lower() == filter_value.lower()]
+        elif filter_operator == "starts_with":
+            df = df[col.str.lower().str.startswith(filter_value.lower())]
+        elif filter_operator == "ends_with":
+            df = df[col.str.lower().str.endswith(filter_value.lower())]
+        elif filter_operator == "greater_than":
+            try:
+                df = df[pd.to_numeric(col, errors="coerce") > float(filter_value)]
+            except Exception:
+                pass
+        elif filter_operator == "less_than":
+            try:
+                df = df[pd.to_numeric(col, errors="coerce") < float(filter_value)]
+            except Exception:
+                pass
+        elif filter_operator == "not_empty":
+            df = df[col.str.strip() != ""]
+        elif filter_operator == "is_empty":
+            df = df[col.str.strip() == ""]
+
+    filtered_rows = len(df)
+
+    # ── Apply sort ────────────────────────────────
+    if sort_by and sort_by in df.columns:
+        ascending = sort_order.lower() != "desc"
+        try:
+            # Try numeric sort first
+            df = df.sort_values(
+                by=sort_by,
+                ascending=ascending,
+                key=lambda x: pd.to_numeric(x, errors="coerce"),
+                na_position="last",
+            )
+        except Exception:
+            df = df.sort_values(
+                by=sort_by,
+                ascending=ascending,
+                na_position="last",
+            )
+
+    # ── Pagination ────────────────────────────────
+    total_pages = max(1, math.ceil(filtered_rows / page_size))
+    page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    page_df = df.iloc[start_idx:end_idx]
+
+    # ── Build rows ────────────────────────────────
+    rows = page_df.to_dict(orient="records")
+
+    # ── Column stats ──────────────────────────────
+    col_stats = {}
+    for col in df.columns:
+        series = df[col]
+        numeric = pd.to_numeric(series, errors="coerce")
+        is_numeric = numeric.notna().sum() > len(series) * 0.5
+
+        stat = {
+            "name": col,
+            "type": "numeric" if is_numeric else "text",
+            "empty_count": (series.str.strip() == "").sum(),
+            "unique": series.nunique(),
+        }
+
+        if is_numeric:
+            stat.update(
+                {
+                    "min": (
+                        round(float(numeric.min()), 4)
+                        if not numeric.isna().all()
+                        else None
+                    ),
+                    "max": (
+                        round(float(numeric.max()), 4)
+                        if not numeric.isna().all()
+                        else None
+                    ),
+                    "mean": (
+                        round(float(numeric.mean()), 4)
+                        if not numeric.isna().all()
+                        else None
+                    ),
+                    "sum": (
+                        round(float(numeric.sum()), 4)
+                        if not numeric.isna().all()
+                        else None
+                    ),
+                }
+            )
+
+        col_stats[col] = stat
+
+    return {
+        "columns": all_columns,
+        "rows": rows,
+        "total_rows": total_rows,
+        "filtered_rows": filtered_rows,
+        "total_columns": total_columns,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_prev": page > 1,
+        "separator": separator or "auto",
+        "encoding": encoding,
+        "col_stats": col_stats,
+        "filter": (
+            {
+                "column": filter_column,
+                "value": filter_value,
+                "operator": filter_operator,
+            }
+            if filter_column
+            else None
+        ),
+        "sort": (
+            {
+                "column": sort_by,
+                "order": sort_order,
+            }
+            if sort_by
+            else None
+        ),
+    }

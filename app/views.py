@@ -4235,7 +4235,6 @@ class MergePDFView(APIView):
         response["X-Files-Merged"] = result["files_merged"]
         response["X-Size-KB"] = result["size_kb"]
         return response
-    
 
 
 class SplitPDFView(APIView):
@@ -4404,3 +4403,239 @@ class SplitPDFView(APIView):
         response["X-Total-Parts"] = len(parts)
         response["X-Split-By"] = split_by
         return response
+
+
+class CSVFileViewerView(APIView):
+    """
+    POST /api/tools/csv-viewer/file/
+    Upload a CSV file → returns parsed data with pagination.
+
+    Form fields:
+        file            : CSV file                          (required)
+        separator       : column separator                  (default: auto)
+        encoding        : utf-8 | ascii | latin-1           (default: utf-8)
+        max_rows        : max rows to load                  (default: 1000)
+        page            : page number                       (default: 1)
+        page_size       : rows per page 1-500               (default: 100)
+        sort_by         : column name to sort               (optional)
+        sort_order      : asc | desc                        (default: asc)
+        filter_column   : column to filter                  (optional)
+        filter_value    : value to filter by                (optional)
+        filter_operator : contains|equals|starts_with|
+                          ends_with|greater_than|less_than|
+                          not_empty|is_empty                (default: contains)
+        columns         : comma-separated column names      (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        separator = request.data.get("separator", None)
+        encoding = request.data.get("encoding", "utf-8")
+        max_rows = request.data.get("max_rows", "1000")
+        page = request.data.get("page", "1")
+        page_size = request.data.get("page_size", "100")
+        sort_by = request.data.get("sort_by", None)
+        sort_order = request.data.get("sort_order", "asc")
+        filter_column = request.data.get("filter_column", None)
+        filter_value = request.data.get("filter_value", None)
+        filter_operator = request.data.get("filter_operator", "contains")
+        columns_raw = request.data.get("columns", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith(".csv"):
+            return Response(
+                {"error": "Only .csv files are accepted."},
+                status=400,
+            )
+
+        # ── Parse integers ─────────────────────────
+        try:
+            max_rows = int(max_rows)
+            page = int(page)
+            page_size = int(page_size)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "max_rows, page, page_size must be integers."},
+                status=400,
+            )
+
+        if not (1 <= page_size <= 500):
+            return Response(
+                {"error": "page_size must be between 1 and 500."},
+                status=400,
+            )
+
+        if not (1 <= max_rows <= 100_000):
+            return Response(
+                {"error": "max_rows must be between 1 and 100,000."},
+                status=400,
+            )
+
+        if sort_order not in ("asc", "desc"):
+            return Response(
+                {"error": "sort_order must be: asc or desc."},
+                status=400,
+            )
+
+        valid_operators = (
+            "contains",
+            "equals",
+            "starts_with",
+            "ends_with",
+            "greater_than",
+            "less_than",
+            "not_empty",
+            "is_empty",
+        )
+        if filter_operator not in valid_operators:
+            return Response(
+                {
+                    "error": f'filter_operator must be one of: {", ".join(valid_operators)}'
+                },
+                status=400,
+            )
+
+        # ── Parse columns ──────────────────────────
+        parsed_columns = None
+        if columns_raw:
+            parsed_columns = [c.strip() for c in columns_raw.split(",") if c.strip()]
+
+        # ── View ──────────────────────────────────
+        try:
+            result = view_csv(
+                file,
+                separator=separator,
+                encoding=encoding,
+                max_rows=max_rows,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                filter_column=filter_column,
+                filter_value=filter_value,
+                filter_operator=filter_operator,
+                columns=parsed_columns,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)
+
+
+class CSVTextViewerView(APIView):
+    """
+    POST /api/tools/csv-viewer/text/
+    Send raw CSV text → returns parsed data with pagination.
+
+    JSON body:
+        {
+            "csv"            : "col1,col2\\nval1,val2",
+            "separator"      : ",",
+            "page"           : 1,
+            "page_size"      : 100,
+            "sort_by"        : "col1",
+            "sort_order"     : "asc",
+            "filter_column"  : "col1",
+            "filter_value"   : "val",
+            "filter_operator": "contains",
+            "columns"        : ["col1", "col2"]
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        csv_text = request.data.get("csv")
+        separator = request.data.get("separator", None)
+        encoding = request.data.get("encoding", "utf-8")
+        max_rows = request.data.get("max_rows", 1000)
+        page = request.data.get("page", 1)
+        page_size = request.data.get("page_size", 100)
+        sort_by = request.data.get("sort_by", None)
+        sort_order = request.data.get("sort_order", "asc")
+        filter_column = request.data.get("filter_column", None)
+        filter_value = request.data.get("filter_value", None)
+        filter_operator = request.data.get("filter_operator", "contains")
+        columns = request.data.get("columns", None)
+
+        # ── Validate ──────────────────────────────
+        if not csv_text:
+            return Response(
+                {"error": '"csv" field is required.'},
+                status=400,
+            )
+
+        # ── Parse integers ─────────────────────────
+        try:
+            max_rows = int(max_rows)
+            page = int(page)
+            page_size = int(page_size)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "max_rows, page, page_size must be integers."},
+                status=400,
+            )
+
+        if not (1 <= page_size <= 500):
+            return Response(
+                {"error": "page_size must be between 1 and 500."},
+                status=400,
+            )
+
+        valid_operators = (
+            "contains",
+            "equals",
+            "starts_with",
+            "ends_with",
+            "greater_than",
+            "less_than",
+            "not_empty",
+            "is_empty",
+        )
+        if filter_operator not in valid_operators:
+            return Response(
+                {
+                    "error": f'filter_operator must be one of: {", ".join(valid_operators)}'
+                },
+                status=400,
+            )
+
+        if sort_order not in ("asc", "desc"):
+            return Response(
+                {"error": "sort_order must be: asc or desc."},
+                status=400,
+            )
+
+        # ── View ──────────────────────────────────
+        try:
+            result = view_csv(
+                str(csv_text),
+                separator=separator,
+                encoding=encoding,
+                max_rows=max_rows,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                filter_column=filter_column,
+                filter_value=filter_value,
+                filter_operator=filter_operator,
+                columns=columns,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        return Response(result)

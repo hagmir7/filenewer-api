@@ -6296,3 +6296,230 @@ def _add_page_numbers_to_writer(writer, total_pages: int):
         overlay_reader = PdfReader(overlay_buffer)
         overlay_page = overlay_reader.pages[0]
         page.merge_page(overlay_page)
+
+
+def split_pdf(
+    source,
+    split_by: str = "page",
+    pages: list = None,
+    chunk_size: int = 1,
+    ranges: list = None,
+    password: str = None,
+) -> list[dict]:
+    """
+    Split a PDF file into multiple documents.
+
+    Args:
+        source     : uploaded file object OR raw bytes
+        split_by   : 'page'   → one PDF per page
+                     'chunk'  → split every N pages
+                     'range'  → extract specific page ranges
+                     'pages'  → extract specific individual pages
+        pages      : list of page numbers for 'pages' mode
+                     e.g. [1, 3, 5] → extract pages 1, 3, 5
+        chunk_size : pages per chunk for 'chunk' mode  (default: 1)
+        ranges     : list of [start, end] for 'range' mode
+                     e.g. [[1,3], [4,6], [7,10]]
+        password   : PDF password if encrypted
+
+    Returns:
+        list of {
+            'index'      : int,
+            'filename'   : str,
+            'bytes'      : bytes,
+            'pages'      : int,
+            'start_page' : int,
+            'end_page'   : int,
+            'size_kb'    : float,
+        }
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+        filename = getattr(source, "name", "document.pdf")
+    elif isinstance(source, bytes):
+        pdf_bytes = source
+        filename = "document.pdf"
+    else:
+        raise ValueError("Invalid source.")
+
+    if not pdf_bytes:
+        raise ValueError("Empty file.")
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    base_name = filename.replace(".pdf", "").replace(".PDF", "")
+
+    # ── Validate split_by ─────────────────────────
+    valid_modes = ("page", "chunk", "range", "pages")
+    if split_by not in valid_modes:
+        raise ValueError(f"split_by must be one of: {valid_modes}")
+
+    # ── Open PDF ──────────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if reader.decrypt(password) == 0:
+            raise ValueError("Wrong password.")
+
+    total_pages = len(reader.pages)
+
+    if total_pages == 0:
+        raise ValueError("PDF has no pages.")
+
+    # ── Helper: write pages to bytes ───────────────
+    def pages_to_bytes(
+        page_numbers: list,
+        start_page: int,
+        end_page: int,
+        part_index: int,
+        label: str = "",
+    ) -> dict:
+        writer = PdfWriter()
+
+        for pn in page_numbers:
+            writer.add_page(reader.pages[pn - 1])
+
+        # Copy metadata
+        if reader.metadata:
+            writer.add_metadata(dict(reader.metadata))
+
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        buffer.seek(0)
+        raw = buffer.read()
+
+        fname = f"{base_name}_part{part_index}"
+        if label:
+            fname += f"_{label}"
+        fname += ".pdf"
+
+        return {
+            "index": part_index,
+            "filename": fname,
+            "bytes": raw,
+            "pages": len(page_numbers),
+            "start_page": start_page,
+            "end_page": end_page,
+            "size_kb": round(len(raw) / 1024, 2),
+        }
+
+    results = []
+
+    # ────────────────────────────────────────────────
+    # MODE 1: One PDF per page
+    # ────────────────────────────────────────────────
+    if split_by == "page":
+        for page_num in range(1, total_pages + 1):
+            result = pages_to_bytes(
+                page_numbers=[page_num],
+                start_page=page_num,
+                end_page=page_num,
+                part_index=page_num,
+                label=f"page{page_num}",
+            )
+            results.append(result)
+
+    # ────────────────────────────────────────────────
+    # MODE 2: Split every N pages (chunk)
+    # ────────────────────────────────────────────────
+    elif split_by == "chunk":
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be at least 1.")
+
+        if chunk_size >= total_pages:
+            raise ValueError(
+                f"chunk_size ({chunk_size}) must be less than "
+                f"total pages ({total_pages})."
+            )
+
+        part_index = 1
+        for start in range(1, total_pages + 1, chunk_size):
+            end = min(start + chunk_size - 1, total_pages)
+            page_numbers = list(range(start, end + 1))
+
+            result = pages_to_bytes(
+                page_numbers=page_numbers,
+                start_page=start,
+                end_page=end,
+                part_index=part_index,
+                label=f"pages{start}-{end}",
+            )
+            results.append(result)
+            part_index += 1
+
+    # ────────────────────────────────────────────────
+    # MODE 3: Extract specific page ranges
+    # ────────────────────────────────────────────────
+    elif split_by == "range":
+        if not ranges:
+            raise ValueError(
+                '"ranges" is required for range mode. ' "e.g. [[1,3], [4,6]]"
+            )
+
+        for part_index, r in enumerate(ranges, start=1):
+            if isinstance(r, (int, float)):
+                start = end = int(r)
+            elif isinstance(r, (list, tuple)) and len(r) == 2:
+                start, end = int(r[0]), int(r[1])
+            else:
+                raise ValueError(
+                    f"Invalid range: {r}. " f"Use integers or [start, end] pairs."
+                )
+
+            if start < 1 or end > total_pages:
+                raise ValueError(
+                    f"Range [{start}, {end}] is out of bounds. "
+                    f"PDF has {total_pages} pages (1-{total_pages})."
+                )
+            if start > end:
+                raise ValueError(
+                    f"Invalid range [{start}, {end}]: " f"start must be <= end."
+                )
+
+            page_numbers = list(range(start, end + 1))
+
+            result = pages_to_bytes(
+                page_numbers=page_numbers,
+                start_page=start,
+                end_page=end,
+                part_index=part_index,
+                label=f"pages{start}-{end}",
+            )
+            results.append(result)
+
+    # ────────────────────────────────────────────────
+    # MODE 4: Extract specific individual pages
+    # ────────────────────────────────────────────────
+    elif split_by == "pages":
+        if not pages:
+            raise ValueError('"pages" is required for pages mode. ' "e.g. [1, 3, 5]")
+
+        # ── Validate page numbers ─────────────────
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"PDF has {total_pages} pages (1-{total_pages})."
+            )
+
+        # ── Option A: each page as separate PDF ────
+        for part_index, page_num in enumerate(sorted(pages), start=1):
+            result = pages_to_bytes(
+                page_numbers=[page_num],
+                start_page=page_num,
+                end_page=page_num,
+                part_index=part_index,
+                label=f"page{page_num}",
+            )
+            results.append(result)
+
+    if not results:
+        raise ValueError("No content found to split.")
+
+    return results

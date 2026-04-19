@@ -4235,3 +4235,172 @@ class MergePDFView(APIView):
         response["X-Files-Merged"] = result["files_merged"]
         response["X-Size-KB"] = result["size_kb"]
         return response
+    
+
+
+class SplitPDFView(APIView):
+    """
+    POST /api/tools/pdf-split/
+    Upload a PDF → returns split PDF files as .zip.
+
+    Form fields:
+        file        : PDF file                          (required)
+        split_by    : page | chunk | range | pages      (default: page)
+        chunk_size  : pages per chunk                   (default: 1)
+        pages       : JSON array for pages mode         (optional)
+                      e.g. [1,3,5]
+        ranges      : JSON array for range mode         (optional)
+                      e.g. [[1,3],[4,6]]
+        password    : PDF password if encrypted         (optional)
+        output      : zip | json                        (default: zip)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        split_by = request.data.get("split_by", "page")
+        chunk_size = request.data.get("chunk_size", "1")
+        pages_raw = request.data.get("pages", None)
+        ranges_raw = request.data.get("ranges", None)
+        password = request.data.get("password", None)
+        output = request.data.get("output", "zip")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        if not file.name.lower().endswith(".pdf"):
+            return Response(
+                {"error": "Only .pdf files are accepted."},
+                status=400,
+            )
+
+        if split_by not in ("page", "chunk", "range", "pages"):
+            return Response(
+                {"error": "split_by must be: page, chunk, range, or pages."},
+                status=400,
+            )
+
+        if output not in ("zip", "json"):
+            return Response(
+                {"error": "output must be: zip or json."},
+                status=400,
+            )
+
+        # ── Parse chunk_size ──────────────────────
+        try:
+            chunk_size = int(chunk_size)
+            if chunk_size < 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "chunk_size must be a positive integer."},
+                status=400,
+            )
+
+        # ── Parse pages ───────────────────────────
+        import json as _json
+
+        parsed_pages = None
+        if pages_raw:
+            try:
+                if isinstance(pages_raw, str):
+                    parsed_pages = _json.loads(pages_raw)
+                elif isinstance(pages_raw, list):
+                    parsed_pages = pages_raw
+                parsed_pages = [int(p) for p in parsed_pages]
+            except Exception:
+                return Response(
+                    {"error": "pages must be valid JSON array: [1,3,5]"},
+                    status=400,
+                )
+
+        # ── Parse ranges ──────────────────────────
+        parsed_ranges = None
+        if ranges_raw:
+            try:
+                if isinstance(ranges_raw, str):
+                    parsed_ranges = _json.loads(ranges_raw)
+                elif isinstance(ranges_raw, list):
+                    parsed_ranges = ranges_raw
+            except Exception:
+                return Response(
+                    {"error": "ranges must be valid JSON array: [[1,3],[4,6]]"},
+                    status=400,
+                )
+
+        # ── Validate required params ───────────────
+        if split_by == "range" and not parsed_ranges:
+            return Response(
+                {"error": "ranges is required for range mode. e.g. [[1,3],[4,6]]"},
+                status=400,
+            )
+
+        if split_by == "pages" and not parsed_pages:
+            return Response(
+                {"error": "pages is required for pages mode. e.g. [1,3,5]"},
+                status=400,
+            )
+
+        # ── Split ─────────────────────────────────
+        try:
+            parts = split_pdf(
+                file,
+                split_by=split_by,
+                pages=parsed_pages,
+                chunk_size=chunk_size,
+                ranges=parsed_ranges,
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        base_name = file.name.replace(".pdf", "").replace(".PDF", "")
+
+        # ── Output: JSON (metadata only) ──────────
+        if output == "json":
+            return Response(
+                {
+                    "total_parts": len(parts),
+                    "split_by": split_by,
+                    "parts": [
+                        {
+                            "index": p["index"],
+                            "filename": p["filename"],
+                            "pages": p["pages"],
+                            "start_page": p["start_page"],
+                            "end_page": p["end_page"],
+                            "size_kb": p["size_kb"],
+                        }
+                        for p in parts
+                    ],
+                }
+            )
+
+        # ── Output: ZIP of all parts ───────────────
+        import zipfile
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for part in parts:
+                zf.writestr(part["filename"], part["bytes"])
+
+        zip_buffer.seek(0)
+
+        response = HttpResponse(
+            zip_buffer.read(),
+            content_type="application/zip",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="{base_name}_split.zip"'
+        )
+        response["X-Total-Parts"] = len(parts)
+        response["X-Split-By"] = split_by
+        return response

@@ -6120,3 +6120,179 @@ def compare_files(
     }
 
     return result
+
+
+def merge_pdfs(
+    sources: list,
+    add_bookmarks: bool = True,
+    add_page_numbers: bool = False,
+    password: str = None,
+) -> dict:
+    """
+    Merge multiple PDF files into one document.
+
+    Args:
+        sources          : list of file objects OR bytes
+        add_bookmarks    : add bookmark per file      (default: True)
+        add_page_numbers : add page numbers           (default: False)
+        password         : output PDF password        (default: None)
+
+    Returns:
+        {
+            'bytes'      : bytes,
+            'total_pages': int,
+            'files_merged': int,
+            'bookmarks'  : list,
+        }
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    if not sources:
+        raise ValueError("No files provided to merge.")
+    if len(sources) < 2:
+        raise ValueError("At least 2 PDF files are required.")
+    if len(sources) > 50:
+        raise ValueError("Maximum 50 files can be merged at once.")
+
+    writer = PdfWriter()
+    total_pages = 0
+    bookmarks = []
+    file_metadata = []
+
+    # ── Process each PDF ──────────────────────────
+    for i, source in enumerate(sources):
+        try:
+            if hasattr(source, "read"):
+                pdf_bytes = source.read()
+                filename = getattr(source, "name", f"file_{i+1}.pdf")
+            elif isinstance(source, bytes):
+                pdf_bytes = source
+                filename = f"file_{i+1}.pdf"
+            else:
+                raise ValueError(f"Invalid source at index {i}.")
+
+            if not pdf_bytes.startswith(b"%PDF"):
+                raise ValueError(f'"{filename}" is not a valid PDF.')
+
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+
+            # ── Decrypt if needed ──────────────────
+            if reader.is_encrypted:
+                raise ValueError(
+                    f'"{filename}" is encrypted. ' f"Please decrypt it first."
+                )
+
+            page_count = len(reader.pages)
+
+            # ── Add bookmark for this file ─────────
+            if add_bookmarks:
+                bookmarks.append(
+                    {
+                        "title": filename.replace(".pdf", "").replace(".PDF", ""),
+                        "page": total_pages + 1,
+                        "page_count": page_count,
+                        "filename": filename,
+                    }
+                )
+
+                writer.add_outline_item(
+                    title=filename.replace(".pdf", "").replace(".PDF", ""),
+                    page_number=total_pages,
+                )
+
+            # ── Copy all pages ─────────────────────
+            for page in reader.pages:
+                writer.add_page(page)
+
+            file_metadata.append(
+                {
+                    "index": i + 1,
+                    "filename": filename,
+                    "pages": page_count,
+                    "start_page": total_pages + 1,
+                    "end_page": total_pages + page_count,
+                }
+            )
+
+            total_pages += page_count
+
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Error processing file {i+1}: {e}")
+
+    # ── Add page numbers if requested ──────────────
+    if add_page_numbers:
+        _add_page_numbers_to_writer(writer, total_pages)
+
+    # ── Add merged metadata ────────────────────────
+    writer.add_metadata(
+        {
+            "/Title": f"Merged PDF ({len(sources)} files)",
+            "/Author": "Merge PDF Service",
+            "/Subject": ", ".join(m["filename"] for m in file_metadata),
+            "/Creator": "PDF Merge Tool",
+        }
+    )
+
+    # ── Encrypt if password provided ───────────────
+    if password:
+        writer.encrypt(
+            user_password=password,
+            owner_password=password,
+            use_128bit=True,
+        )
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    merged_bytes = buffer.read()
+
+    return {
+        "bytes": merged_bytes,
+        "total_pages": total_pages,
+        "files_merged": len(sources),
+        "size_kb": round(len(merged_bytes) / 1024, 2),
+        "size_mb": round(len(merged_bytes) / (1024 * 1024), 2),
+        "bookmarks": bookmarks,
+        "files": file_metadata,
+    }
+
+
+def _add_page_numbers_to_writer(writer, total_pages: int):
+    """
+    Add page number overlay to each page.
+    Uses reportlab to create a transparent overlay.
+    """
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.lib.pagesizes import A4
+
+    for page_num in range(total_pages):
+        page = writer.pages[page_num]
+
+        # Get page dimensions
+        try:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+        except Exception:
+            width, height = A4
+
+        # Create overlay with page number
+        overlay_buffer = io.BytesIO()
+        c = rl_canvas.Canvas(overlay_buffer, pagesize=(width, height))
+        c.setFont("Helvetica", 9)
+        c.setFillColorRGB(0.5, 0.5, 0.5, alpha=0.8)
+        c.drawCentredString(
+            width / 2,
+            20,
+            f"Page {page_num + 1} of {total_pages}",
+        )
+        c.save()
+        overlay_buffer.seek(0)
+
+        # Merge overlay onto page
+        overlay_reader = PdfReader(overlay_buffer)
+        overlay_page = overlay_reader.pages[0]
+        page.merge_page(overlay_page)

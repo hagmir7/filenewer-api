@@ -56,6 +56,7 @@ urlpatterns = [
     path('tools/split-docx',              SplitDOCXView.as_view(),          name='split-docx'), 
     path('tools/text-compare',    TextCompareView.as_view(),  name='text-compare'),
     path('tools/file-compare',    FileCompareView.as_view(),  name='file-compare'),
+    path('tools/pdf-merge', MergePDFView.as_view(), name='pdf-merge'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

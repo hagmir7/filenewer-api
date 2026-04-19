@@ -3943,7 +3943,6 @@ class SplitDOCXView(APIView):
         return response
 
 
-
 class TextCompareView(APIView):
     """
     POST /api/tools/text-compare
@@ -4124,3 +4123,115 @@ class FileCompareView(APIView):
             return Response({"error": str(e)}, status=500)
 
         return Response(result)
+
+
+class MergePDFView(APIView):
+    """
+    POST /api/tools/pdf-merge/
+    Upload 2-50 PDF files → returns merged PDF.
+
+    Form fields:
+        files[]          : multiple PDF files              (required, min 2)
+        add_bookmarks    : true | false                    (default: true)
+        add_page_numbers : true | false                    (default: false)
+        password         : output PDF password             (optional)
+        output_filename  : custom output filename          (optional)
+        output           : file | json                     (default: file)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        files = request.FILES.getlist("files[]")
+        add_bookmarks = request.data.get("add_bookmarks", "true")
+        add_page_numbers = request.data.get("add_page_numbers", "false")
+        password = request.data.get("password", None)
+        output_filename = request.data.get("output_filename", "merged.pdf")
+        output = request.data.get("output", "file")
+
+        # ── Also support without [] ────────────────
+        if not files:
+            files = request.FILES.getlist("files")
+
+        # ── Validate ──────────────────────────────
+        if not files:
+            return Response(
+                {"error": "No files provided. Use files[] field."},
+                status=400,
+            )
+        if len(files) < 2:
+            return Response(
+                {"error": "At least 2 PDF files are required."},
+                status=400,
+            )
+        if len(files) > 50:
+            return Response(
+                {"error": "Maximum 50 files can be merged at once."},
+                status=400,
+            )
+
+        # ── Validate file types ────────────────────
+        for f in files:
+            if not f.name.lower().endswith(".pdf"):
+                return Response(
+                    {"error": f'"{f.name}" is not a PDF file.'},
+                    status=400,
+                )
+
+        if output not in ("file", "json"):
+            return Response(
+                {"error": "output must be: file or json."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        add_bookmarks = to_bool(add_bookmarks)
+        add_page_numbers = to_bool(add_page_numbers)
+
+        # ── Output filename ───────────────────────
+        if not output_filename.endswith(".pdf"):
+            output_filename += ".pdf"
+
+        # ── Merge ─────────────────────────────────
+        try:
+            result = merge_pdfs(
+                sources=files,
+                add_bookmarks=add_bookmarks,
+                add_page_numbers=add_page_numbers,
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output: JSON (metadata only) ───────────
+        if output == "json":
+            return Response(
+                {
+                    "total_pages": result["total_pages"],
+                    "files_merged": result["files_merged"],
+                    "size_kb": result["size_kb"],
+                    "size_mb": result["size_mb"],
+                    "bookmarks": result["bookmarks"],
+                    "files": result["files"],
+                }
+            )
+
+        # ── Output: file download (default) ────────
+        response = HttpResponse(
+            result["bytes"],
+            content_type="application/pdf",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(result["bytes"])
+        response["X-Total-Pages"] = result["total_pages"]
+        response["X-Files-Merged"] = result["files_merged"]
+        response["X-Size-KB"] = result["size_kb"]
+        return response

@@ -4639,3 +4639,136 @@ class CSVTextViewerView(APIView):
             return Response({"error": str(e)}, status=500)
 
         return Response(result)
+
+
+
+class WordToMarkdownView(APIView):
+    """
+    POST /api/convert/word-to-markdown/
+    Upload a Word file (.docx) → returns Markdown text.
+
+    Form fields:
+        file              : Word file (.docx)               (required)
+        include_tables    : true | false                    (default: true)
+        include_images    : true | false                    (default: false)
+        include_toc       : true | false                    (default: false)
+        heading_style     : atx | setext                    (default: atx)
+        code_block_style  : fenced | indented               (default: fenced)
+        preserve_emphasis : true | false                    (default: true)
+        encoding          : utf-8 | ascii | latin-1         (default: utf-8)
+        output            : json | file                     (default: json)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        include_tables = request.data.get("include_tables", "true")
+        include_images = request.data.get("include_images", "false")
+        include_toc = request.data.get("include_toc", "false")
+        heading_style = request.data.get("heading_style", "atx")
+        code_block_style = request.data.get("code_block_style", "fenced")
+        preserve_emphasis = request.data.get("preserve_emphasis", "true")
+        encoding = request.data.get("encoding", "utf-8")
+        output = request.data.get("output", "json")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        if not file.name.lower().endswith((".docx", ".doc")):
+            return Response(
+                {"error": "Only .docx or .doc files are accepted."},
+                status=400,
+            )
+
+        if heading_style not in ("atx", "setext"):
+            return Response(
+                {"error": "heading_style must be: atx or setext."},
+                status=400,
+            )
+
+        if code_block_style not in ("fenced", "indented"):
+            return Response(
+                {"error": "code_block_style must be: fenced or indented."},
+                status=400,
+            )
+
+        if output not in ("json", "file"):
+            return Response(
+                {"error": "output must be: json or file."},
+                status=400,
+            )
+
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_tables = to_bool(include_tables)
+        include_images = to_bool(include_images)
+        include_toc = to_bool(include_toc)
+        preserve_emphasis = to_bool(preserve_emphasis)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = word_to_markdown(
+                file,
+                filename=file.name,
+                include_tables=include_tables,
+                include_images=include_images,
+                include_toc=include_toc,
+                heading_style=heading_style,
+                code_block_style=code_block_style,
+                preserve_emphasis=preserve_emphasis,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output: download .md file ──────────────
+        if output == "file":
+            md_filename = (
+                file.name.replace(".docx", ".md")
+                .replace(".DOCX", ".md")
+                .replace(".doc", ".md")
+                .replace(".DOC", ".md")
+            )
+            response = HttpResponse(
+                result["markdown"].encode(encoding),
+                content_type=f"text/markdown; charset={encoding}",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{md_filename}"'
+            response["Content-Length"] = len(result["markdown"].encode(encoding))
+            response["X-Word-Count"] = result["word_count"]
+            response["X-Char-Count"] = result["char_count"]
+            response["X-Table-Count"] = result["table_count"]
+            response["X-Heading-Count"] = len(result["headings"])
+            return response
+
+        # ── Output: JSON response (default) ────────
+        return Response(
+            {
+                "markdown": result["markdown"],
+                "headings": result["headings"],
+                "word_count": result["word_count"],
+                "char_count": result["char_count"],
+                "table_count": result["table_count"],
+                "image_count": result["image_count"],
+                "toc": result["toc"],
+                "encoding": result["encoding"],
+            }
+        )

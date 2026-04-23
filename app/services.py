@@ -6740,3 +6740,394 @@ def view_csv(
             else None
         ),
     }
+
+
+def word_to_markdown(
+    source,
+    filename: str = "document.docx",
+    include_tables: bool = True,
+    include_images: bool = False,
+    include_toc: bool = False,
+    heading_style: str = "atx",
+    code_block_style: str = "fenced",
+    preserve_emphasis: bool = True,
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Convert Word (.docx) → Markdown text.
+
+    Args:
+        source            : uploaded file object OR raw bytes
+        filename          : original filename
+        include_tables    : convert tables to markdown     (default: True)
+        include_images    : include image placeholders     (default: False)
+        include_toc       : generate table of contents    (default: False)
+        heading_style     : 'atx'  → # Heading
+                            'setext' → Heading\n======    (default: atx)
+        code_block_style  : 'fenced'  → ```code```
+                            'indented' → 4-space indent   (default: fenced)
+        preserve_emphasis : preserve bold/italic          (default: True)
+        encoding          : output encoding               (default: utf-8)
+
+    Returns:
+        {
+            'markdown'    : str,
+            'headings'    : list,
+            'word_count'  : int,
+            'char_count'  : int,
+            'table_count' : int,
+            'image_count' : int,
+            'toc'         : str,
+        }
+    """
+    from docx import Document as DocxDocument
+    from docx.text.paragraph import Paragraph as DocxPara
+    from docx.table import Table as DocxTable
+    from docx.oxml.ns import qn
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        file_bytes = source.read()
+    elif isinstance(source, bytes):
+        file_bytes = source
+    else:
+        raise ValueError("source must be a file object or bytes.")
+
+    if not file_bytes:
+        raise ValueError("Empty file.")
+
+    # ── Open document ─────────────────────────────
+    try:
+        doc = DocxDocument(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise ValueError(f"Cannot open Word document: {e}")
+
+    # ── Tracking ──────────────────────────────────
+    lines = []
+    headings = []
+    table_count = 0
+    image_count = 0
+
+    # ── Helpers ────────────────────────────────────
+    def escape_md(text: str) -> str:
+        """Escape markdown special characters in plain text."""
+        chars = r"\`*_{}[]()#+-.!"
+        for ch in chars:
+            text = text.replace(ch, "\\" + ch)
+        return text
+
+    def runs_to_md(para) -> str:
+        """Convert paragraph runs to markdown with emphasis."""
+        if not preserve_emphasis:
+            return para.text
+
+        parts = []
+        for run in para.runs:
+            text = run.text
+            if not text:
+                continue
+
+            # Bold + Italic
+            if run.bold and run.italic:
+                text = f"***{text}***"
+            elif run.bold:
+                text = f"**{text}**"
+            elif run.italic:
+                text = f"*{text}*"
+
+            # Strikethrough
+            if run.font.strike:
+                text = f"~~{text}~~"
+
+            # Underline (no markdown equivalent — use HTML)
+            if run.underline:
+                text = f"<u>{text}</u>"
+
+            # Inline code (Courier/monospace font)
+            try:
+                font_name = run.font.name or ""
+                if "courier" in font_name.lower() or "mono" in font_name.lower():
+                    text = f"`{text}`"
+            except Exception:
+                pass
+
+            # Hyperlink
+            try:
+                if run._element.getparent().tag.endswith("}hyperlink"):
+                    rId = run._element.getparent().get(qn("r:id"), "")
+                    href = ""
+                    try:
+                        href = doc.part.rels[rId].target_ref
+                    except Exception:
+                        pass
+                    if href:
+                        text = f"[{text}]({href})"
+            except Exception:
+                pass
+
+            parts.append(text)
+
+        return "".join(parts)
+
+    def process_heading(para, level: int) -> str:
+        """Convert heading paragraph to markdown."""
+        text = para.text.strip()
+        slug = re.sub(r"[^\w\s-]", "", text.lower())
+        slug = re.sub(r"[\s]+", "-", slug).strip("-")
+
+        headings.append(
+            {
+                "level": level,
+                "text": text,
+                "slug": slug,
+            }
+        )
+
+        if heading_style == "setext" and level <= 2:
+            underline = ("=" if level == 1 else "-") * max(len(text), 3)
+            return f"{text}\n{underline}"
+        else:
+            return "#" * level + " " + text
+
+    def process_table(tbl) -> str:
+        """Convert table to markdown."""
+        nonlocal table_count
+        table_count += 1
+
+        rows_data = []
+        for row in tbl.rows:
+            row_data = []
+            for cell in row.cells:
+                cell_text = " ".join(
+                    p.text.strip() for p in cell.paragraphs if p.text.strip()
+                )
+                # Escape pipes inside cells
+                cell_text = cell_text.replace("|", "\\|")
+                row_data.append(cell_text)
+            rows_data.append(row_data)
+
+        if not rows_data:
+            return ""
+
+        # Normalize column count
+        num_cols = max(len(row) for row in rows_data)
+        rows_data = [row + [""] * (num_cols - len(row)) for row in rows_data]
+
+        # Calculate column widths
+        col_widths = [
+            max(len(rows_data[r][c]) for r in range(len(rows_data)))
+            for c in range(num_cols)
+        ]
+        col_widths = [max(w, 3) for w in col_widths]
+
+        def format_row(row):
+            cells = [row[c].ljust(col_widths[c]) for c in range(num_cols)]
+            return "| " + " | ".join(cells) + " |"
+
+        # Header row
+        md_lines = [format_row(rows_data[0])]
+
+        # Separator row
+        sep = "| " + " | ".join("-" * w for w in col_widths) + " |"
+        md_lines.append(sep)
+
+        # Data rows
+        for row in rows_data[1:]:
+            md_lines.append(format_row(row))
+
+        return "\n".join(md_lines)
+
+    def process_list_paragraph(para, name: str) -> str:
+        """Convert list paragraph to markdown."""
+        text = runs_to_md(para)
+        level = 0
+
+        # Detect indent level
+        try:
+            indent = para.paragraph_format.left_indent
+            if indent:
+                level = min(int(indent.pt // 18), 4)
+        except Exception:
+            pass
+
+        prefix = "  " * level
+
+        if "bullet" in name:
+            return f"{prefix}- {text}"
+        elif "number" in name:
+            return f"{prefix}1. {text}"
+
+        return f"- {text}"
+
+    def generate_toc(headings: list) -> str:
+        """Generate table of contents from headings."""
+        if not headings:
+            return ""
+
+        toc_lines = ["## Table of Contents\n"]
+        for h in headings:
+            indent = "  " * (h["level"] - 1)
+            toc_lines.append(f'{indent}- [{h["text"]}](#{h["slug"]})')
+        return "\n".join(toc_lines)
+
+    # ── Process document elements ──────────────────
+    prev_was_list = False
+
+    for element in doc.element.body:
+        tag = element.tag.split("}")[-1]
+
+        # ── Paragraph ─────────────────────────────
+        if tag == "p":
+            para = DocxPara(element, doc)
+            text = para.text.strip()
+            style_name = (para.style.name or "Normal").lower()
+
+            # ── Page break ─────────────────────────
+            if any(
+                br.get(qn("w:type")) == "page"
+                for br in element.findall(".//" + qn("w:br"))
+            ):
+                lines.append("\n---\n")
+                continue
+
+            # ── Headings ───────────────────────────
+            if "heading 1" in style_name or style_name == "title":
+                lines.append(process_heading(para, 1))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            if "heading 2" in style_name or style_name == "subtitle":
+                lines.append(process_heading(para, 2))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            if "heading 3" in style_name:
+                lines.append(process_heading(para, 3))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            if "heading 4" in style_name:
+                lines.append(process_heading(para, 4))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            if "heading 5" in style_name:
+                lines.append(process_heading(para, 5))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            if "heading 6" in style_name:
+                lines.append(process_heading(para, 6))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            # ── Empty paragraph ────────────────────
+            if not text:
+                if prev_was_list:
+                    lines.append("")
+                    prev_was_list = False
+                else:
+                    lines.append("")
+                continue
+
+            # ── List items ─────────────────────────
+            if "list bullet" in style_name or "list number" in style_name:
+                lines.append(process_list_paragraph(para, style_name))
+                prev_was_list = True
+                continue
+
+            # ── Code / preformatted ────────────────
+            if "code" in style_name or "preformat" in style_name:
+                if code_block_style == "fenced":
+                    lines.append(f"```\n{text}\n```")
+                else:
+                    lines.append("\n".join("    " + l for l in text.splitlines()))
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            # ── Quote / blockquote ─────────────────
+            if "quote" in style_name or "block text" in style_name:
+                quoted = "\n".join(f"> {l}" for l in text.splitlines())
+                lines.append(quoted)
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            # ── Horizontal rule ────────────────────
+            if re.match(r"^[-_*]{3,}$", text):
+                lines.append("---")
+                lines.append("")
+                prev_was_list = False
+                continue
+
+            # ── Image check ────────────────────────
+            if include_images:
+                drawing_elements = element.findall(".//" + qn("w:drawing"))
+                if drawing_elements:
+                    image_count += 1
+                    lines.append(f"![Image {image_count}](image_{image_count}.png)")
+                    lines.append("")
+                    continue
+
+            # ── Regular paragraph ──────────────────
+            md_text = runs_to_md(para)
+            if md_text.strip():
+                lines.append(md_text)
+                lines.append("")
+            prev_was_list = False
+
+        # ── Table ──────────────────────────────────
+        elif tag == "tbl":
+            if include_tables:
+                try:
+                    tbl = DocxTable(element, doc)
+                    tbl_md = process_table(tbl)
+                    if tbl_md:
+                        lines.append("")
+                        lines.append(tbl_md)
+                        lines.append("")
+                except Exception as e:
+                    lines.append(f"<!-- Table error: {e} -->")
+                    lines.append("")
+            prev_was_list = False
+
+        elif tag == "sectPr":
+            pass
+
+    # ── Join and clean up ──────────────────────────
+    markdown = "\n".join(lines)
+
+    # Remove excessive blank lines
+    import re as _re
+
+    markdown = _re.sub(r"\n{3,}", "\n\n", markdown)
+    markdown = markdown.strip()
+
+    # ── Generate TOC ──────────────────────────────
+    toc = ""
+    if include_toc and headings:
+        toc = generate_toc(headings)
+        markdown = toc + "\n\n---\n\n" + markdown
+
+    # ── Stats ─────────────────────────────────────
+    word_count = len(markdown.split())
+    char_count = len(markdown)
+
+    return {
+        "markdown": markdown,
+        "headings": headings,
+        "word_count": word_count,
+        "char_count": char_count,
+        "table_count": table_count,
+        "image_count": image_count,
+        "toc": toc,
+        "encoding": encoding,
+    }

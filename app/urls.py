@@ -59,6 +59,7 @@ urlpatterns = [
     path('tools/pdf-split', SplitPDFView.as_view(), name='pdf-split'),
     path('tools/csv-viewer-file', CSVFileViewerView.as_view(), name='csv-viewer-file'),
     path('tools/csv-viewer-text', CSVTextViewerView.as_view(), name='csv-viewer-text'),
+    path('tools/word-to-markdown', WordToMarkdownView.as_view(), name='word-to-markdown'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

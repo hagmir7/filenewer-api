@@ -7726,12 +7726,47 @@ def markdown_to_word(
     return buffer.read()
 
 
+
+
+
+
+def _safe_auto_fit(ws, min_width: int = 8, max_width: int = 60):
+    """
+    Auto-fit column widths.
+    Safely skips MergedCell objects which have no column_letter attribute.
+    Call this instead of any loop using col_cells[0].column_letter.
+    """
+    from openpyxl.cell.cell import MergedCell
+
+    col_widths = {}
+
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            try:
+                col_letter = cell.column_letter
+            except AttributeError:
+                continue
+            if not col_letter:
+                continue
+
+            length = len(str(cell.value)) if cell.value is not None else 0
+            col_widths[col_letter] = max(
+                col_widths.get(col_letter, min_width),
+                min(length + 4, max_width),
+            )
+
+    for letter, width in col_widths.items():
+        ws.column_dimensions[letter].width = width
+
+
 def markdown_to_excel(
     source,
-    filename: str = "document.md",
-    sheet_name: str = None,
-    encoding: str = "utf-8",
-    include_stats: bool = True,
+    filename      : str  = 'document.md',
+    sheet_name    : str  = None,
+    encoding      : str  = 'utf-8',
+    include_stats : bool = True,
 ) -> bytes:
     """
     Convert Markdown (.md) → Excel (.xlsx).
@@ -7753,152 +7788,117 @@ def markdown_to_excel(
     Returns:
         Raw bytes of the generated .xlsx file
     """
-    from openpyxl import Workbook
-    from openpyxl.styles import (
-        Font,
-        PatternFill,
-        Alignment,
-        Border,
-        Side,
-    )
-    from openpyxl.cell.cell import MergedCell
+    from openpyxl        import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     import re
 
     # ── Read source ───────────────────────────────
-    if hasattr(source, "read"):
+    if hasattr(source, 'read'):
         raw = source.read()
         if isinstance(raw, bytes):
-            raw = raw.decode(encoding, errors="replace")
+            raw = raw.decode(encoding, errors='replace')
     elif isinstance(source, bytes):
-        raw = source.decode(encoding, errors="replace")
+        raw = source.decode(encoding, errors='replace')
     elif isinstance(source, str):
         raw = source
     else:
-        raise ValueError("source must be a string, bytes, or file object.")
+        raise ValueError('source must be a string, bytes, or file object.')
 
     if not raw.strip():
-        raise ValueError("Empty input.")
+        raise ValueError('Empty input.')
 
     # ── Style constants ────────────────────────────
-    BLUE = "2E75B6"
-    LIGHT_BLUE = "DCE6F1"
-    DARK_BLUE = "1F4E79"
-    GREEN = "70AD47"
-    ORANGE = "ED7D31"
-    GREY = "F2F2F2"
-    WHITE = "FFFFFF"
+    BLUE       = '2E75B6'
+    LIGHT_BLUE = 'DCE6F1'
+    DARK_BLUE  = '1F4E79'
+    GREEN      = '70AD47'
+    ORANGE     = 'ED7D31'
+    GREY       = 'F2F2F2'
+    WHITE      = 'FFFFFF'
 
     thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
+        left  =Side(style='thin'),
+        right =Side(style='thin'),
+        top   =Side(style='thin'),
+        bottom=Side(style='thin'),
     )
 
     # ── Style helpers ──────────────────────────────
     def header_style(cell, color=BLUE):
-        cell.font = Font(bold=True, color=WHITE, size=11)
-        cell.fill = PatternFill(fill_type="solid", fgColor=color)
+        cell.font      = Font(bold=True, color=WHITE, size=11)
+        cell.fill      = PatternFill(fill_type='solid', fgColor=color)
         cell.alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True
+            horizontal='center', vertical='center', wrap_text=True
         )
         cell.border = thin_border
 
     def data_style(cell, even_row=False, bold=False):
-        cell.fill = PatternFill(
-            fill_type="solid",
+        cell.fill      = PatternFill(
+            fill_type='solid',
             fgColor=LIGHT_BLUE if even_row else WHITE,
         )
-        cell.font = Font(bold=bold, size=10)
-        cell.alignment = Alignment(vertical="center", wrap_text=True)
-        cell.border = thin_border
-
-    # ── Safe auto-fit (handles MergedCell) ────────
-    def auto_fit_columns(ws, min_width=8, max_width=60):
-        col_widths = {}
-
-        for row in ws.iter_rows():
-            for cell in row:
-                # ── Skip merged cells ──────────────
-                if isinstance(cell, MergedCell):
-                    continue
-                try:
-                    col_letter = cell.column_letter
-                except AttributeError:
-                    continue
-                if col_letter is None:
-                    continue
-
-                length = len(str(cell.value)) if cell.value is not None else 0
-                col_widths[col_letter] = max(
-                    col_widths.get(col_letter, min_width),
-                    min(length + 4, max_width),
-                )
-
-        for col_letter, width in col_widths.items():
-            ws.column_dimensions[col_letter].width = width
+        cell.font      = Font(bold=bold, size=10)
+        cell.alignment = Alignment(vertical='center', wrap_text=True)
+        cell.border    = thin_border
 
     # ── Inline markdown stripper ───────────────────
     def strip_md_inline(text: str) -> str:
-        text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)
-        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-        text = re.sub(r"__(.+?)__", r"\1", text)
-        text = re.sub(r"\*(.+?)\*", r"\1", text)
-        text = re.sub(r"_(.+?)_", r"\1", text)
-        text = re.sub(r"~~(.+?)~~", r"\1", text)
-        text = re.sub(r"`(.+?)`", r"\1", text)
-        text = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", text)
-        text = re.sub(r"<[^>]+>", "", text)
+        text = re.sub(r'\*\*\*(.+?)\*\*\*', r'\1', text)
+        text = re.sub(r'\*\*(.+?)\*\*',     r'\1', text)
+        text = re.sub(r'__(.+?)__',          r'\1', text)
+        text = re.sub(r'\*(.+?)\*',          r'\1', text)
+        text = re.sub(r'_(.+?)_',            r'\1', text)
+        text = re.sub(r'~~(.+?)~~',          r'\1', text)
+        text = re.sub(r'`(.+?)`',            r'\1', text)
+        text = re.sub(r'\[(.+?)\]\(.+?\)',   r'\1', text)
+        text = re.sub(r'<[^>]+>',            '',    text)
         return text.strip()
 
     # ─────────────────────────────────────────────
     # Parse Markdown
     # ─────────────────────────────────────────────
-    lines = raw.splitlines()
-    total = len(lines)
-    i = 0
-
-    tables = []
-    code_blocks = []
-    headings = []
-    list_items = []
-    paragraphs = []
-    current_table_title = ""
+    lines               = raw.splitlines()
+    total               = len(lines)
+    i                   = 0
+    tables              = []
+    code_blocks         = []
+    headings            = []
+    list_items          = []
+    paragraphs          = []
+    current_table_title = ''
 
     while i < total:
-        line = lines[i]
+        line     = lines[i]
         stripped = line.strip()
 
         # ── Empty line ─────────────────────────────
         if not stripped:
-            current_table_title = ""
+            current_table_title = ''
             i += 1
             continue
 
         # ── Fenced code block ──────────────────────
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            fence = stripped[:3]
-            language = stripped[3:].strip()
-            i += 1
+        if stripped.startswith('```') or stripped.startswith('~~~'):
+            fence      = stripped[:3]
+            language   = stripped[3:].strip()
+            i         += 1
             code_lines = []
             while i < total and not lines[i].strip().startswith(fence):
                 code_lines.append(lines[i])
                 i += 1
-            code_blocks.append(
-                {
-                    "language": language or "plain",
-                    "code": "\n".join(code_lines),
-                }
-            )
+            code_blocks.append({
+                'language': language or 'plain',
+                'code'    : '\n'.join(code_lines),
+            })
             i += 1
             continue
 
         # ── ATX Heading ────────────────────────────
-        m = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        m = re.match(r'^(#{1,6})\s+(.+)$', stripped)
         if m:
             level = len(m.group(1))
-            text = strip_md_inline(m.group(2).rstrip("#").strip())
-            headings.append({"level": level, "text": text})
+            text  = strip_md_inline(m.group(2).rstrip('#').strip())
+            headings.append({'level': level, 'text': text})
             current_table_title = text
             i += 1
             continue
@@ -7906,91 +7906,90 @@ def markdown_to_excel(
         # ── Setext Heading ─────────────────────────
         if i + 1 < total:
             next_line = lines[i + 1].strip()
-            if next_line and set(next_line) == {"="}:
+            if next_line and set(next_line) == {'='}:
                 text = strip_md_inline(stripped)
-                headings.append({"level": 1, "text": text})
+                headings.append({'level': 1, 'text': text})
                 current_table_title = text
                 i += 2
                 continue
-            if next_line and set(next_line) == {"-"} and len(next_line) >= 2:
+            if next_line and set(next_line) == {'-'} and len(next_line) >= 2:
                 text = strip_md_inline(stripped)
-                headings.append({"level": 2, "text": text})
+                headings.append({'level': 2, 'text': text})
                 current_table_title = text
                 i += 2
                 continue
 
         # ── Table ──────────────────────────────────
-        if stripped.startswith("|") and "|" in stripped[1:]:
+        if stripped.startswith('|') and '|' in stripped[1:]:
             table_lines = []
-            while i < total and lines[i].strip().startswith("|"):
+            while i < total and lines[i].strip().startswith('|'):
                 table_lines.append(lines[i].strip())
                 i += 1
 
-            headers = []
-            rows = []
+            headers  = []
+            rows     = []
             is_first = True
 
             for tl in table_lines:
-                if re.match(r"^\|?[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$", tl):
+                if re.match(
+                    r'^\|?[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$', tl
+                ):
                     continue
-                cells = [strip_md_inline(c.strip()) for c in tl.strip("|").split("|")]
+                cells = [
+                    strip_md_inline(c.strip())
+                    for c in tl.strip('|').split('|')
+                ]
                 if is_first:
-                    headers = cells
+                    headers  = cells
                     is_first = False
                 else:
                     rows.append(cells)
 
             if headers:
-                tables.append(
-                    {
-                        "title": current_table_title or f"Table {len(tables)+1}",
-                        "headers": headers,
-                        "rows": rows,
-                    }
-                )
+                tables.append({
+                    'title'  : current_table_title or f'Table {len(tables)+1}',
+                    'headers': headers,
+                    'rows'   : rows,
+                })
             continue
 
         # ── Bullet list ────────────────────────────
-        m = re.match(r"^(\s*)[-*+]\s+(\[[ xX]\]\s+)?(.+)$", line)
+        m = re.match(r'^(\s*)[-*+]\s+(\[[ xX]\]\s+)?(.+)$', line)
         if m:
-            level = len(m.group(1)) // 2
+            level   = len(m.group(1)) // 2
             checked = None
-            text = strip_md_inline(m.group(3))
+            text    = strip_md_inline(m.group(3))
             if m.group(2):
-                checked = m.group(2).strip()[1].lower() == "x"
-            list_items.append(
-                {
-                    "type": "bullet",
-                    "level": level,
-                    "text": text,
-                    "checked": checked,
-                }
-            )
+                checked = m.group(2).strip()[1].lower() == 'x'
+            list_items.append({
+                'type'   : 'bullet',
+                'level'  : level,
+                'text'   : text,
+                'checked': checked,
+            })
             i += 1
             continue
 
         # ── Numbered list ──────────────────────────
-        m = re.match(r"^(\s*)\d+[.)]\s+(.+)$", line)
+        m = re.match(r'^(\s*)\d+[.)]\s+(.+)$', line)
         if m:
             level = len(m.group(1)) // 3
-            text = strip_md_inline(m.group(2))
-            list_items.append(
-                {
-                    "type": "number",
-                    "level": level,
-                    "text": text,
-                }
-            )
+            text  = strip_md_inline(m.group(2))
+            list_items.append({
+                'type' : 'number',
+                'level': level,
+                'text' : text,
+            })
             i += 1
             continue
 
         # ── Horizontal rule ────────────────────────
-        if re.match(r"^[-*_]{3,}$", stripped.replace(" ", "")):
+        if re.match(r'^[-*_]{3,}$', stripped.replace(' ', '')):
             i += 1
             continue
 
         # ── Regular paragraph ──────────────────────
-        if stripped and not stripped.startswith(">"):
+        if stripped and not stripped.startswith('>'):
             paragraphs.append(strip_md_inline(stripped))
 
         i += 1
@@ -8005,39 +8004,29 @@ def markdown_to_excel(
     # Sheet: Summary
     # ────────────────────────────────────────────────
     if include_stats:
-        ws_summary = wb.create_sheet("Summary")
+        ws_summary = wb.create_sheet('Summary')
         ws_summary.sheet_properties.tabColor = BLUE
 
-        # ── Title row (merged) ─────────────────────
-        ws_summary["A1"] = f"Markdown Document: {filename}"
-        ws_summary["A1"].font = Font(bold=True, size=14, color=DARK_BLUE)
-        ws_summary.merge_cells("A1:C1")
+        # Title (merged A1:C1)
+        ws_summary['A1'] = f'Markdown Document: {filename}'
+        ws_summary['A1'].font = Font(bold=True, size=14, color=DARK_BLUE)
+        ws_summary.merge_cells('A1:C1')
         ws_summary.row_dimensions[1].height = 30
 
-        # ── Stats rows ─────────────────────────────
         stats = [
-            ("Property", "Value", "Details"),
-            ("Filename", filename, ""),
-            ("Total Headings", len(headings), "H1–H6 headings found"),
-            (
-                "Tables Found",
-                len(tables),
-                f'{sum(len(t["rows"]) for t in tables)} total rows',
-            ),
-            (
-                "Code Blocks",
-                len(code_blocks),
-                ", ".join(set(c["language"] for c in code_blocks)) or "none",
-            ),
-            (
-                "List Items",
-                len(list_items),
-                f'{sum(1 for l in list_items if l["type"]=="bullet")} bullets, '
-                f'{sum(1 for l in list_items if l["type"]=="number")} numbered',
-            ),
-            ("Paragraphs", len(paragraphs), ""),
-            ("Total Words", len(raw.split()), ""),
-            ("Total Chars", len(raw), ""),
+            ('Property',       'Value',         'Details'),
+            ('Filename',        filename,         ''),
+            ('Total Headings',  len(headings),    'H1–H6 headings found'),
+            ('Tables Found',    len(tables),
+             f'{sum(len(t["rows"]) for t in tables)} total rows'),
+            ('Code Blocks',     len(code_blocks),
+             ', '.join(set(c['language'] for c in code_blocks)) or 'none'),
+            ('List Items',      len(list_items),
+             f'{sum(1 for l in list_items if l["type"]=="bullet")} bullets, '
+             f'{sum(1 for l in list_items if l["type"]=="number")} numbered'),
+            ('Paragraphs',      len(paragraphs),  ''),
+            ('Total Words',     len(raw.split()), ''),
+            ('Total Chars',     len(raw),          ''),
         ]
 
         for row_idx, row_data in enumerate(stats, start=2):
@@ -8048,111 +8037,113 @@ def markdown_to_excel(
                 else:
                     data_style(cell, even_row=(row_idx % 2 == 0))
 
-        auto_fit_columns(ws_summary)
-        ws_summary.freeze_panes = "A3"
+        # ✅ Safe auto-fit — skips merged B1/C1
+        _safe_auto_fit(ws_summary)
+        ws_summary.freeze_panes = 'A3'
 
     # ────────────────────────────────────────────────
     # Sheet: Structure (Headings)
     # ────────────────────────────────────────────────
     if headings:
-        ws_struct = wb.create_sheet("Structure")
+        ws_struct = wb.create_sheet('Structure')
         ws_struct.sheet_properties.tabColor = DARK_BLUE
 
-        for col_idx, h in enumerate(["Level", "Heading", "Indent"], start=1):
+        for col_idx, h in enumerate(
+            ['Level', 'Heading', 'Indent'], start=1
+        ):
             header_style(ws_struct.cell(row=1, column=col_idx, value=h))
 
         for row_idx, h in enumerate(headings, start=2):
-            indent = "  " * (h["level"] - 1) + h["text"]
-            even = row_idx % 2 == 0
+            indent = '  ' * (h['level'] - 1) + h['text']
+            even   = row_idx % 2 == 0
 
-            # Level badge
-            lv_cell = ws_struct.cell(row=row_idx, column=1, value=f'H{h["level"]}')
-            lv_cell.font = Font(bold=True, color=WHITE, size=10)
-            lv_cell.fill = PatternFill(
-                fill_type="solid",
-                fgColor=BLUE if h["level"] <= 2 else DARK_BLUE,
+            lv = ws_struct.cell(row=row_idx, column=1, value=f'H{h["level"]}')
+            lv.font      = Font(bold=True, color=WHITE, size=10)
+            lv.fill      = PatternFill(
+                fill_type='solid',
+                fgColor=BLUE if h['level'] <= 2 else DARK_BLUE,
             )
-            lv_cell.alignment = Alignment(horizontal="center", vertical="center")
-            lv_cell.border = thin_border
+            lv.alignment = Alignment(horizontal='center', vertical='center')
+            lv.border    = thin_border
 
-            # Heading text
-            h2_cell = ws_struct.cell(row=row_idx, column=2, value=h["text"])
-            h2_cell.font = Font(bold=h["level"] <= 2, size=10)
-            data_style(h2_cell, even_row=even)
+            h2 = ws_struct.cell(row=row_idx, column=2, value=h['text'])
+            h2.font = Font(bold=h['level'] <= 2, size=10)
+            data_style(h2, even_row=even)
 
-            # Indented
             data_style(
                 ws_struct.cell(row=row_idx, column=3, value=indent),
                 even_row=even,
             )
 
-        auto_fit_columns(ws_struct)
-        ws_struct.freeze_panes = "A2"
+        # ✅ Safe auto-fit
+        _safe_auto_fit(ws_struct)
+        ws_struct.freeze_panes = 'A2'
 
     # ────────────────────────────────────────────────
     # Sheets: One per table
     # ────────────────────────────────────────────────
     for t_idx, table in enumerate(tables, start=1):
-        safe_name = re.sub(r"[^\w\s]", "", table["title"])[:28].strip()
-        sheet_label = (safe_name or f"Table_{t_idx}")[:31]
+        safe_name   = re.sub(r'[^\w\s]', '', table['title'])[:28].strip()
+        sheet_label = (safe_name or f'Table_{t_idx}')[:31]
 
         existing = [ws.title for ws in wb.worksheets]
         if sheet_label in existing:
-            sheet_label = f"{sheet_label[:27]}_{t_idx}"
+            sheet_label = f'{sheet_label[:27]}_{t_idx}'
 
         ws_tbl = wb.create_sheet(sheet_label)
         ws_tbl.sheet_properties.tabColor = GREEN
 
-        # ── Table title ────────────────────────────
-        title_cell = ws_tbl.cell(row=1, column=1, value=table["title"])
+        # Title row (merged)
+        title_cell      = ws_tbl.cell(row=1, column=1, value=table['title'])
         title_cell.font = Font(bold=True, size=13, color=DARK_BLUE)
-        if table["headers"]:
+        if table['headers']:
             ws_tbl.merge_cells(
-                start_row=1,
-                end_row=1,
+                start_row   =1, end_row=1,
                 start_column=1,
-                end_column=len(table["headers"]),
+                end_column  =len(table['headers']),
             )
         ws_tbl.row_dimensions[1].height = 25
 
-        # ── Headers ────────────────────────────────
-        for col_idx, header in enumerate(table["headers"], start=1):
+        # Headers
+        for col_idx, header in enumerate(table['headers'], start=1):
             header_style(ws_tbl.cell(row=2, column=col_idx, value=header))
         ws_tbl.row_dimensions[2].height = 22
-        ws_tbl.freeze_panes = "A3"
+        ws_tbl.freeze_panes = 'A3'
 
-        # ── Data rows ──────────────────────────────
-        for row_idx, row_data in enumerate(table["rows"], start=3):
-            num_cols = len(table["headers"])
+        # Data rows
+        for row_idx, row_data in enumerate(table['rows'], start=3):
+            num_cols = len(table['headers'])
             for col_idx in range(num_cols):
-                raw_val = row_data[col_idx] if col_idx < len(row_data) else ""
-
-                # Try numeric conversion
-                value = raw_val
+                raw_val = row_data[col_idx] if col_idx < len(row_data) else ''
+                value   = raw_val
                 try:
-                    value = int(raw_val) if "." not in str(raw_val) else float(raw_val)
+                    value = int(raw_val) if '.' not in str(raw_val) \
+                        else float(raw_val)
                 except (ValueError, TypeError):
                     pass
 
-                cell = ws_tbl.cell(row=row_idx, column=col_idx + 1, value=value)
+                cell = ws_tbl.cell(
+                    row=row_idx, column=col_idx + 1, value=value
+                )
                 data_style(cell, even_row=(row_idx % 2 == 0))
-
                 if isinstance(value, (int, float)):
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    cell.alignment = Alignment(
+                        horizontal='right', vertical='center'
+                    )
 
-        # ── Totals row ─────────────────────────────
-        if table["rows"]:
-            total_row = len(table["rows"]) + 3
+        # Totals row
+        if table['rows']:
+            total_row = len(table['rows']) + 3
 
-            tot_cell = ws_tbl.cell(row=total_row, column=1, value="TOTAL")
-            tot_cell.font = Font(bold=True, color=WHITE)
-            tot_cell.fill = PatternFill(fill_type="solid", fgColor=BLUE)
-            tot_cell.alignment = Alignment(horizontal="center")
-            tot_cell.border = thin_border
+            tc0 = ws_tbl.cell(row=total_row, column=1, value='TOTAL')
+            tc0.font      = Font(bold=True, color=WHITE)
+            tc0.fill      = PatternFill(fill_type='solid', fgColor=BLUE)
+            tc0.alignment = Alignment(horizontal='center')
+            tc0.border    = thin_border
 
-            for col_idx in range(1, len(table["headers"])):
+            for col_idx in range(1, len(table['headers'])):
                 numeric_vals = []
-                for rd in table["rows"]:
+                for rd in table['rows']:
                     if col_idx < len(rd):
                         try:
                             numeric_vals.append(float(rd[col_idx]))
@@ -8161,157 +8152,170 @@ def markdown_to_excel(
 
                 tc = ws_tbl.cell(row=total_row, column=col_idx + 1)
                 if numeric_vals:
-                    tc.value = sum(numeric_vals)
-                    tc.font = Font(bold=True, color=WHITE)
-                    tc.alignment = Alignment(horizontal="right", vertical="center")
-                tc.fill = PatternFill(fill_type="solid", fgColor=BLUE)
+                    tc.value     = sum(numeric_vals)
+                    tc.font      = Font(bold=True, color=WHITE)
+                    tc.alignment = Alignment(
+                        horizontal='right', vertical='center'
+                    )
+                tc.fill   = PatternFill(fill_type='solid', fgColor=BLUE)
                 tc.border = thin_border
 
-        auto_fit_columns(ws_tbl)
+        # ✅ Safe auto-fit — skips merged title row cells
+        _safe_auto_fit(ws_tbl)
 
     # ────────────────────────────────────────────────
     # Sheet: Lists
     # ────────────────────────────────────────────────
     if list_items:
-        ws_list = wb.create_sheet("Lists")
+        ws_list = wb.create_sheet('Lists')
         ws_list.sheet_properties.tabColor = ORANGE
 
-        for col_idx, h in enumerate(["#", "Type", "Level", "Item", "Status"], start=1):
+        for col_idx, h in enumerate(
+            ['#', 'Type', 'Level', 'Item', 'Status'], start=1
+        ):
             header_style(
                 ws_list.cell(row=1, column=col_idx, value=h),
                 color=ORANGE,
             )
-        ws_list.freeze_panes = "A2"
+        ws_list.freeze_panes = 'A2'
 
         for row_idx, item in enumerate(list_items, start=2):
             even = row_idx % 2 == 0
 
-            num_cell = ws_list.cell(row=row_idx, column=1, value=row_idx - 1)
-            data_style(num_cell, even_row=even)
-            num_cell.alignment = Alignment(horizontal="center", vertical="center")
+            nc = ws_list.cell(row=row_idx, column=1, value=row_idx - 1)
+            data_style(nc, even_row=even)
+            nc.alignment = Alignment(horizontal='center', vertical='center')
 
-            type_label = "• Bullet" if item["type"] == "bullet" else "1. Number"
+            type_label = '• Bullet' if item['type'] == 'bullet' else '1. Number'
             data_style(
                 ws_list.cell(row=row_idx, column=2, value=type_label),
                 even_row=even,
             )
 
-            lv_cell = ws_list.cell(row=row_idx, column=3, value=item["level"])
-            data_style(lv_cell, even_row=even)
-            lv_cell.alignment = Alignment(horizontal="center", vertical="center")
+            lvc = ws_list.cell(row=row_idx, column=3, value=item['level'])
+            data_style(lvc, even_row=even)
+            lvc.alignment = Alignment(horizontal='center', vertical='center')
 
-            indent_text = "  " * item["level"] + item["text"]
+            indent_text = '  ' * item['level'] + item['text']
             data_style(
                 ws_list.cell(row=row_idx, column=4, value=indent_text),
                 even_row=even,
-                bold=(item["level"] == 0),
+                bold=(item['level'] == 0),
             )
 
-            status = ""
-            if item.get("checked") is not None:
-                status = "☑ Done" if item["checked"] else "☐ Todo"
-            st_cell = ws_list.cell(row=row_idx, column=5, value=status)
-            data_style(st_cell, even_row=even)
-            if status == "☑ Done":
-                st_cell.font = Font(color="70AD47", bold=True, size=10)
-            elif status == "☐ Todo":
-                st_cell.font = Font(color="ED7D31", bold=True, size=10)
+            status  = ''
+            checked = item.get('checked')
+            if checked is not None:
+                status = '☑ Done' if checked else '☐ Todo'
+            st = ws_list.cell(row=row_idx, column=5, value=status)
+            data_style(st, even_row=even)
+            if status == '☑ Done':
+                st.font = Font(color='70AD47', bold=True, size=10)
+            elif status == '☐ Todo':
+                st.font = Font(color='ED7D31', bold=True, size=10)
 
-        auto_fit_columns(ws_list)
+        # ✅ Safe auto-fit
+        _safe_auto_fit(ws_list)
 
     # ────────────────────────────────────────────────
     # Sheet: Code
     # ────────────────────────────────────────────────
     if code_blocks:
-        ws_code = wb.create_sheet("Code")
-        ws_code.sheet_properties.tabColor = "404040"
+        ws_code = wb.create_sheet('Code')
+        ws_code.sheet_properties.tabColor = '404040'
 
-        for col_idx, h in enumerate(["#", "Language", "Code", "Lines"], start=1):
+        for col_idx, h in enumerate(
+            ['#', 'Language', 'Code', 'Lines'], start=1
+        ):
             header_style(
                 ws_code.cell(row=1, column=col_idx, value=h),
-                color="404040",
+                color='404040',
             )
-        ws_code.freeze_panes = "A2"
+        ws_code.freeze_panes = 'A2'
 
         for row_idx, block in enumerate(code_blocks, start=2):
             even = row_idx % 2 == 0
 
-            num_cell = ws_code.cell(row=row_idx, column=1, value=row_idx - 1)
-            data_style(num_cell, even_row=even)
-            num_cell.alignment = Alignment(horizontal="center", vertical="center")
+            nc = ws_code.cell(row=row_idx, column=1, value=row_idx - 1)
+            data_style(nc, even_row=even)
+            nc.alignment = Alignment(horizontal='center', vertical='center')
 
             data_style(
-                ws_code.cell(row=row_idx, column=2, value=block["language"]),
+                ws_code.cell(row=row_idx, column=2, value=block['language']),
                 even_row=even,
                 bold=True,
             )
 
-            code_cell = ws_code.cell(row=row_idx, column=3, value=block["code"])
-            code_cell.font = Font(name="Courier New", size=9)
-            code_cell.fill = PatternFill(fill_type="solid", fgColor=GREY)
-            code_cell.alignment = Alignment(vertical="top", wrap_text=True)
-            code_cell.border = thin_border
+            cc           = ws_code.cell(
+                row=row_idx, column=3, value=block['code']
+            )
+            cc.font      = Font(name='Courier New', size=9)
+            cc.fill      = PatternFill(fill_type='solid', fgColor=GREY)
+            cc.alignment = Alignment(vertical='top', wrap_text=True)
+            cc.border    = thin_border
             ws_code.row_dimensions[row_idx].height = min(
-                15 * block["code"].count("\n") + 15, 200
+                15 * block['code'].count('\n') + 15, 200
             )
 
-            lines_cell = ws_code.cell(
-                row=row_idx,
-                column=4,
-                value=block["code"].count("\n") + 1,
+            lc = ws_code.cell(
+                row=row_idx, column=4,
+                value=block['code'].count('\n') + 1,
             )
-            data_style(lines_cell, even_row=even)
-            lines_cell.alignment = Alignment(horizontal="center", vertical="center")
+            data_style(lc, even_row=even)
+            lc.alignment = Alignment(horizontal='center', vertical='center')
 
-        ws_code.column_dimensions["A"].width = 5
-        ws_code.column_dimensions["B"].width = 15
-        ws_code.column_dimensions["C"].width = 80
-        ws_code.column_dimensions["D"].width = 8
+        # ✅ Fixed column widths (no auto-fit — code column is wide)
+        ws_code.column_dimensions['A'].width = 5
+        ws_code.column_dimensions['B'].width = 15
+        ws_code.column_dimensions['C'].width = 80
+        ws_code.column_dimensions['D'].width = 8
 
     # ────────────────────────────────────────────────
     # Sheet: Content (paragraphs)
     # ────────────────────────────────────────────────
     if paragraphs:
-        ws_content = wb.create_sheet("Content")
+        ws_content = wb.create_sheet('Content')
         ws_content.sheet_properties.tabColor = GREEN
 
-        for col_idx, h in enumerate(["#", "Paragraph"], start=1):
+        for col_idx, h in enumerate(['#', 'Paragraph'], start=1):
             header_style(
                 ws_content.cell(row=1, column=col_idx, value=h),
                 color=GREEN,
             )
-        ws_content.freeze_panes = "A2"
+        ws_content.freeze_panes = 'A2'
 
         for row_idx, para in enumerate(paragraphs, start=2):
             even = row_idx % 2 == 0
 
-            num_cell = ws_content.cell(row=row_idx, column=1, value=row_idx - 1)
-            data_style(num_cell, even_row=even)
-            num_cell.alignment = Alignment(horizontal="center", vertical="center")
+            nc = ws_content.cell(row=row_idx, column=1, value=row_idx - 1)
+            data_style(nc, even_row=even)
+            nc.alignment = Alignment(horizontal='center', vertical='center')
 
-            p_cell = ws_content.cell(row=row_idx, column=2, value=para)
-            p_cell.font = Font(size=10)
-            p_cell.fill = PatternFill(
-                fill_type="solid",
+            pc           = ws_content.cell(row=row_idx, column=2, value=para)
+            pc.font      = Font(size=10)
+            pc.fill      = PatternFill(
+                fill_type='solid',
                 fgColor=LIGHT_BLUE if even else WHITE,
             )
-            p_cell.alignment = Alignment(vertical="top", wrap_text=True)
-            p_cell.border = thin_border
+            pc.alignment = Alignment(vertical='top', wrap_text=True)
+            pc.border    = thin_border
 
-        ws_content.column_dimensions["A"].width = 5
-        ws_content.column_dimensions["B"].width = 100
+        # ✅ Fixed widths for content sheet
+        ws_content.column_dimensions['A'].width = 5
+        ws_content.column_dimensions['B'].width = 100
 
-    # ── Fallback empty sheet ───────────────────────
+    # ── Fallback ───────────────────────────────────
     if not wb.worksheets:
-        ws = wb.create_sheet("Content")
-        ws["A1"] = "No structured content found in Markdown."
-        ws["A1"].font = Font(size=11, color="FF0000")
+        ws = wb.create_sheet('Content')
+        ws['A1'] = 'No structured content found in Markdown.'
+        ws['A1'].font = Font(size=11, color='FF0000')
 
     # ── Serialize ─────────────────────────────────
     buffer = io.BytesIO()
     wb.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
 
 
 def excel_to_markdown(

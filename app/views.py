@@ -4772,3 +4772,141 @@ class WordToMarkdownView(APIView):
                 "encoding": result["encoding"],
             }
         )
+
+
+
+class MarkdownToWordView(APIView):
+    """
+    POST /api/convert/markdown-to-word/
+    Upload .md file or send raw markdown → returns .docx file.
+
+    Form fields (file upload):
+        file           : .md / .txt file                  (required)
+        title          : document title                   (optional)
+        font_name      : Calibri|Arial|Times New Roman    (default: Calibri)
+        font_size      : font size pt                     (default: 11)
+        line_spacing   : 1.0 | 1.15 | 1.5 | 2.0         (default: 1.15)
+        page_size      : A4 | Letter | Legal | A3         (default: A4)
+        encoding       : utf-8 | ascii | latin-1          (default: utf-8)
+        output_filename: custom output filename           (optional)
+
+    JSON body (raw markdown):
+        {
+            "markdown"      : "# Hello\n\nWorld",
+            "title"         : "My Document",
+            "font_name"     : "Calibri",
+            "font_size"     : 11,
+            "line_spacing"  : 1.15,
+            "page_size"     : "A4"
+        }
+    """
+    parser_classes     = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file            = request.FILES.get('file',            None)
+        markdown_text   = request.data.get('markdown',         None)
+        title           = request.data.get('title',            '')
+        font_name       = request.data.get('font_name',        'Calibri')
+        font_size       = request.data.get('font_size',        11)
+        line_spacing    = request.data.get('line_spacing',     1.15)
+        page_size       = request.data.get('page_size',        'A4')
+        encoding        = request.data.get('encoding',         'utf-8')
+        output_filename = request.data.get('output_filename',  None)
+
+        # ── Validate ──────────────────────────────
+        if not file and not markdown_text:
+            return Response(
+                {'error': 'Provide either "file" (.md) or "markdown" (raw string).'},
+                status=400,
+            )
+
+        if file and not file.name.lower().endswith(('.md', '.markdown', '.txt')):
+            return Response(
+                {'error': 'Only .md, .markdown, or .txt files are accepted.'},
+                status=400,
+            )
+
+        # ── Parse types ───────────────────────────
+        try:
+            font_size    = int(font_size)
+            line_spacing = float(line_spacing)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'font_size must be integer, line_spacing must be float.'},
+                status=400,
+            )
+
+        if not (6 <= font_size <= 72):
+            return Response(
+                {'error': 'font_size must be between 6 and 72.'},
+                status=400,
+            )
+
+        if not (1.0 <= line_spacing <= 3.0):
+            return Response(
+                {'error': 'line_spacing must be between 1.0 and 3.0.'},
+                status=400,
+            )
+
+        valid_fonts = (
+            'Calibri', 'Arial', 'Times New Roman',
+            'Georgia', 'Verdana', 'Helvetica',
+            'Courier New', 'Tahoma', 'Trebuchet MS',
+        )
+        if font_name not in valid_fonts:
+            return Response(
+                {'error': f'font_name must be one of: {", ".join(valid_fonts)}'},
+                status=400,
+            )
+
+        if page_size not in ('A4', 'Letter', 'Legal', 'A3'):
+            return Response(
+                {'error': 'page_size must be: A4, Letter, Legal, or A3.'},
+                status=400,
+            )
+
+        # ── Source + filename ──────────────────────
+        source   = file if file else str(markdown_text)
+        src_name = file.name if file else 'document.md'
+
+        if not output_filename:
+            output_filename = (
+                src_name
+                .replace('.md',       '.docx')
+                .replace('.markdown', '.docx')
+                .replace('.txt',      '.docx')
+            )
+        if not output_filename.endswith('.docx'):
+            output_filename += '.docx'
+
+        # ── Convert ───────────────────────────────
+        try:
+            docx_bytes = markdown_to_word(
+                source,
+                filename    =src_name,
+                title       =str(title),
+                font_name   =font_name,
+                font_size   =font_size,
+                line_spacing=line_spacing,
+                page_size   =page_size,
+                encoding    =encoding,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        # ── Return .docx download ──────────────────
+        response = HttpResponse(
+            docx_bytes,
+            content_type=(
+                'application/vnd.openxmlformats-officedocument'
+                '.wordprocessingml.document'
+            ),
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="{output_filename}"'
+        )
+        response['Content-Length'] = len(docx_bytes)
+        return response

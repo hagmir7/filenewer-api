@@ -7131,3 +7131,598 @@ def word_to_markdown(
         "toc": toc,
         "encoding": encoding,
     }
+
+
+
+
+def markdown_to_word(
+    source,
+    filename      : str   = 'document.md',
+    title         : str   = '',
+    font_name     : str   = 'Calibri',
+    font_size     : int   = 11,
+    line_spacing  : float = 1.15,
+    page_size     : str   = 'A4',
+    encoding      : str   = 'utf-8',
+) -> bytes:
+    """
+    Convert Markdown (.md) → Word (.docx).
+
+    Handles:
+        - Headings      # ## ### #### ##### ######
+        - Setext        Title\n=== / Section\n---
+        - Bold          **text** / __text__
+        - Italic        *text* / _text_
+        - Bold+Italic   ***text***
+        - Strikethrough ~~text~~
+        - Inline code   `code`
+        - Code blocks   ```lang\ncode\n```
+        - Blockquotes   > text
+        - Bullet lists  - * +
+        - Numbered lists 1. 2. 3.
+        - Tables        | col | col |
+        - Horizontal rules --- *** ___
+        - Links         [text](url)
+        - Images        ![alt](url)
+        - HTML tags     <u> <br> <mark>
+        - Nested lists
+        - Task lists    - [ ] / - [x]
+
+    Args:
+        source       : file object | raw markdown string | bytes
+        filename     : original filename
+        title        : document title (metadata)
+        font_name    : body font                  (default: Calibri)
+        font_size    : body font size pt          (default: 11)
+        line_spacing : line spacing multiplier    (default: 1.15)
+        page_size    : A4 | Letter | Legal | A3  (default: A4)
+        encoding     : input text encoding       (default: utf-8)
+
+    Returns:
+        Raw bytes of the generated .docx file
+    """
+    from docx                    import Document
+    from docx.shared             import Pt, Inches, RGBColor
+    from docx.oxml.ns            import qn
+    from docx.oxml               import OxmlElement
+    from docx.enum.text          import WD_ALIGN_PARAGRAPH
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, 'read'):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors='replace')
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors='replace')
+    elif isinstance(source, str):
+        raw = source
+    else:
+        raise ValueError('source must be a string, bytes, or file object.')
+
+    if not raw.strip():
+        raise ValueError('Empty input.')
+
+    # ── Page sizes ────────────────────────────────
+    page_sizes = {
+        'A4'    : (Inches(8.27),  Inches(11.69)),
+        'Letter': (Inches(8.5),   Inches(11.0) ),
+        'Legal' : (Inches(8.5),   Inches(14.0) ),
+        'A3'    : (Inches(11.69), Inches(16.54)),
+    }
+    if page_size not in page_sizes:
+        page_size = 'A4'
+    page_w, page_h = page_sizes[page_size]
+
+    # ── Create document ───────────────────────────
+    doc     = Document()
+    section = doc.sections[0]
+    section.page_width    = page_w
+    section.page_height   = page_h
+    section.left_margin   = Inches(1)
+    section.right_margin  = Inches(1)
+    section.top_margin    = Inches(1)
+    section.bottom_margin = Inches(1)
+
+    # ── Metadata ──────────────────────────────────
+    doc.core_properties.title   = title or filename.replace('.md', '')
+    doc.core_properties.author  = 'Markdown to Word Converter'
+    doc.core_properties.subject = 'Converted from Markdown'
+
+    # ── Default style ─────────────────────────────
+    normal_style          = doc.styles['Normal']
+    normal_style.font.name = font_name
+    normal_style.font.size = Pt(font_size)
+
+    # ── Heading colors ─────────────────────────────
+    heading_colors = {
+        1: RGBColor(0x2E, 0x75, 0xB6),
+        2: RGBColor(0x2E, 0x75, 0xB6),
+        3: RGBColor(0x1F, 0x4E, 0x79),
+        4: RGBColor(0x1F, 0x4E, 0x79),
+        5: RGBColor(0x40, 0x40, 0x40),
+        6: RGBColor(0x40, 0x40, 0x40),
+    }
+
+    # ── Line spacing helper ────────────────────────
+    def set_spacing(para, spacing=None):
+        spacing = spacing or line_spacing
+        pPr     = para._p.get_or_add_pPr()
+        sp      = OxmlElement('w:spacing')
+        sp.set(qn('w:line'),     str(int(spacing * 240)))
+        sp.set(qn('w:lineRule'), 'auto')
+        pPr.append(sp)
+
+    # ── Add heading ────────────────────────────────
+    def add_heading(text: str, level: int):
+        text  = text.strip()
+        para  = doc.add_heading('', level=min(level, 6))
+        run   = para.add_run(apply_inline(text, para))
+        color = heading_colors.get(level, RGBColor(0, 0, 0))
+        for r in para.runs:
+            r.font.color.rgb = color
+        return para
+
+    # ── Add paragraph ──────────────────────────────
+    def add_paragraph(text: str, style: str = None, align=None) -> 'Paragraph':
+        para = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+        apply_inline_to_para(text.strip(), para)
+        if align:
+            para.alignment = align
+        set_spacing(para)
+        return para
+
+    # ── Inline markdown parser ─────────────────────
+    def apply_inline(text: str, para=None) -> str:
+        """Parse inline markdown — returns plain text (side-effect: adds runs)."""
+        if para is None:
+            return text
+        apply_inline_to_para(text, para)
+        return ''
+
+    def apply_inline_to_para(text: str, para):
+        """Parse inline markdown and add styled runs to paragraph."""
+
+        # Pattern: bold+italic, bold, italic, strikethrough,
+        #          inline code, link, image, underline HTML
+        pattern = re.compile(
+            r'(\*\*\*(.+?)\*\*\*)'           # bold+italic ***
+            r'|(__(.+?)__)'                   # bold __
+            r'|(\*\*(.+?)\*\*)'              # bold **
+            r'|(_(.+?)_)'                     # italic _
+            r'|(\*(.+?)\*)'                   # italic *
+            r'|(~~(.+?)~~)'                   # strikethrough
+            r'|(`(.+?)`)'                     # inline code
+            r'|(\[(.+?)\]\((.+?)\))'         # link
+            r'|(!?\[(.+?)\]\((.+?)\))'       # image
+            r'|(<u>(.+?)<\/u>)'              # underline HTML
+            r'|(<mark>(.+?)<\/mark>)'        # highlight HTML
+            r'|(<br\s*\/?>)',                 # line break
+            re.DOTALL
+        )
+
+        last_end = 0
+        for m in pattern.finditer(text):
+            # Add plain text before this match
+            if m.start() > last_end:
+                plain = text[last_end:m.start()]
+                if plain:
+                    run = para.add_run(plain)
+                    run.font.name = font_name
+                    run.font.size = Pt(font_size)
+
+            matched = m.group(0)
+
+            # ── Bold + Italic ***text*** ───────────
+            if m.group(1):
+                run       = para.add_run(m.group(2))
+                run.bold  = True
+                run.italic= True
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+
+            # ── Bold __text__ ──────────────────────
+            elif m.group(3):
+                run      = para.add_run(m.group(4))
+                run.bold = True
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+
+            # ── Bold **text** ──────────────────────
+            elif m.group(5):
+                run      = para.add_run(m.group(6))
+                run.bold = True
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+
+            # ── Italic _text_ ──────────────────────
+            elif m.group(7):
+                run        = para.add_run(m.group(8))
+                run.italic = True
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+
+            # ── Italic *text* ──────────────────────
+            elif m.group(9):
+                run        = para.add_run(m.group(10))
+                run.italic = True
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+
+            # ── Strikethrough ~~text~~ ─────────────
+            elif m.group(11):
+                run            = para.add_run(m.group(12))
+                run.font.strike= True
+                run.font.name  = font_name
+                run.font.size  = Pt(font_size)
+
+            # ── Inline code `code` ─────────────────
+            elif m.group(13):
+                run           = para.add_run(m.group(14))
+                run.font.name = 'Courier New'
+                run.font.size = Pt(font_size - 1)
+                run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+
+            # ── Link [text](url) ───────────────────
+            elif m.group(15):
+                link_text = m.group(16)
+                link_url  = m.group(17)
+                run       = para.add_run(link_text)
+                run.font.name  = font_name
+                run.font.size  = Pt(font_size)
+                run.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+                run.font.underline = True
+
+            # ── Image ![alt](url) ──────────────────
+            elif m.group(18):
+                alt_text = m.group(19)
+                run      = para.add_run(f'[Image: {alt_text}]')
+                run.font.name  = font_name
+                run.font.size  = Pt(font_size)
+                run.font.color.rgb = RGBColor(0x70, 0x70, 0x70)
+                run.italic = True
+
+            # ── Underline <u>text</u> ──────────────
+            elif m.group(21):
+                run               = para.add_run(m.group(22))
+                run.font.underline = True
+                run.font.name     = font_name
+                run.font.size     = Pt(font_size)
+
+            # ── Highlight <mark>text</mark> ────────
+            elif m.group(23):
+                run           = para.add_run(m.group(24))
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+                run.font.highlight_color = 7  # yellow
+
+            # ── Line break <br> ────────────────────
+            elif m.group(25):
+                run = para.add_run()
+                run.add_break()
+
+            last_end = m.end()
+
+        # Remaining plain text
+        remaining = text[last_end:]
+        if remaining:
+            run           = para.add_run(remaining)
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+
+    # ── Add code block ─────────────────────────────
+    def add_code_block(code: str, language: str = ''):
+        para           = doc.add_paragraph()
+        run            = para.add_run(code)
+        run.font.name  = 'Courier New'
+        run.font.size  = Pt(font_size - 1)
+        run.font.color.rgb = RGBColor(0x24, 0x29, 0x2E)
+
+        # Grey background via paragraph shading
+        pPr  = para._p.get_or_add_pPr()
+        shd  = OxmlElement('w:shd')
+        shd.set(qn('w:val'),   'clear')
+        shd.set(qn('w:color'), 'auto')
+        shd.set(qn('w:fill'),  'F2F2F2')
+        pPr.append(shd)
+
+        # Left border (code style)
+        pBdr   = OxmlElement('w:pBdr')
+        left   = OxmlElement('w:left')
+        left.set(qn('w:val'),   'single')
+        left.set(qn('w:sz'),    '12')
+        left.set(qn('w:space'), '4')
+        left.set(qn('w:color'), '2E75B6')
+        pBdr.append(left)
+        pPr.append(pBdr)
+
+        # Indentation
+        ind = OxmlElement('w:ind')
+        ind.set(qn('w:left'), '360')
+        pPr.append(ind)
+
+        set_spacing(para, 1.0)
+
+        if language:
+            # Add language label
+            lang_para = doc.add_paragraph()
+            lang_run  = lang_para.add_run(f'[{language}]')
+            lang_run.font.name  = 'Courier New'
+            lang_run.font.size  = Pt(8)
+            lang_run.font.color.rgb = RGBColor(0x70, 0x70, 0x70)
+            lang_run.italic = True
+
+    # ── Add blockquote ─────────────────────────────
+    def add_blockquote(text: str):
+        para = doc.add_paragraph()
+        apply_inline_to_para(text, para)
+        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        set_spacing(para)
+
+        pPr  = para._p.get_or_add_pPr()
+
+        # Left blue border
+        pBdr = OxmlElement('w:pBdr')
+        left = OxmlElement('w:left')
+        left.set(qn('w:val'),   'single')
+        left.set(qn('w:sz'),    '16')
+        left.set(qn('w:space'), '4')
+        left.set(qn('w:color'), '2E75B6')
+        pBdr.append(left)
+        pPr.append(pBdr)
+
+        # Left indent
+        ind = OxmlElement('w:ind')
+        ind.set(qn('w:left'), '720')
+        pPr.append(ind)
+
+        # Grey text
+        for run in para.runs:
+            run.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+            run.italic = True
+
+    # ── Add horizontal rule ────────────────────────
+    def add_horizontal_rule():
+        para = doc.add_paragraph()
+        para.paragraph_format.space_before = Pt(6)
+        para.paragraph_format.space_after  = Pt(6)
+
+        pPr  = para._p.get_or_add_pPr()
+        pBdr = OxmlElement('w:pBdr')
+        bot  = OxmlElement('w:bottom')
+        bot.set(qn('w:val'),   'single')
+        bot.set(qn('w:sz'),    '6')
+        bot.set(qn('w:space'), '1')
+        bot.set(qn('w:color'), '2E75B6')
+        pBdr.append(bot)
+        pPr.append(pBdr)
+
+    # ── Add markdown table ─────────────────────────
+    def add_table(lines: list):
+        # Parse rows (skip separator row)
+        rows_data = []
+        for line in lines:
+            line = line.strip()
+            if re.match(r'^\|?[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$', line):
+                continue  # skip separator
+            cells = [
+                c.strip()
+                for c in line.strip('|').split('|')
+            ]
+            rows_data.append(cells)
+
+        if not rows_data:
+            return
+
+        num_cols  = max(len(r) for r in rows_data)
+        num_rows  = len(rows_data)
+        rows_data = [r + [''] * (num_cols - len(r)) for r in rows_data]
+
+        tbl = doc.add_table(rows=num_rows, cols=num_cols)
+        tbl.style = 'Table Grid'
+
+        from docx.oxml import OxmlElement as OXE
+
+        for r_idx, row_data in enumerate(rows_data):
+            row = tbl.rows[r_idx]
+            for c_idx, cell_text in enumerate(row_data):
+                cell = row.cells[c_idx]
+
+                # Clear default paragraph
+                for p in cell.paragraphs:
+                    p._element.getparent().remove(p._element)
+
+                new_para = cell.add_paragraph()
+                apply_inline_to_para(cell_text, new_para)
+
+                # Style header row
+                if r_idx == 0:
+                    for run in new_para.runs:
+                        run.bold = True
+                        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+                    tc   = cell._tc
+                    tcPr = tc.get_or_add_tcPr()
+                    shd  = OXE('w:shd')
+                    shd.set(qn('w:fill'),  '2E75B6')
+                    shd.set(qn('w:color'), 'auto')
+                    shd.set(qn('w:val'),   'clear')
+                    tcPr.append(shd)
+                else:
+                    # Alternating rows
+                    if r_idx % 2 == 0:
+                        tc   = cell._tc
+                        tcPr = tc.get_or_add_tcPr()
+                        shd  = OXE('w:shd')
+                        shd.set(qn('w:fill'),  'DCE6F1')
+                        shd.set(qn('w:color'), 'auto')
+                        shd.set(qn('w:val'),   'clear')
+                        tcPr.append(shd)
+
+        doc.add_paragraph()   # spacing after table
+
+    # ── Add list item ──────────────────────────────
+    def add_list_item(
+        text    : str,
+        ordered : bool = False,
+        level   : int  = 0,
+        checked : bool = None,
+    ):
+        style = 'List Number' if ordered else 'List Bullet'
+        para  = doc.add_paragraph(style=style)
+
+        # Indent nested lists
+        if level > 0:
+            from docx.shared import Inches as IN
+            para.paragraph_format.left_indent = IN(0.5 * (level + 1))
+
+        # Task list checkbox
+        if checked is not None:
+            checkbox = '☑ ' if checked else '☐ '
+            run      = para.add_run(checkbox)
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+
+        apply_inline_to_para(text.strip(), para)
+        set_spacing(para)
+        return para
+
+    # ─────────────────────────────────────────────
+    # Parse Markdown lines
+    # ─────────────────────────────────────────────
+    lines      = raw.splitlines()
+    i          = 0
+    total      = len(lines)
+
+    # Add title if provided
+    if title:
+        add_heading(title, 1)
+        doc.add_paragraph()
+
+    while i < total:
+        line     = lines[i]
+        stripped = line.strip()
+
+        # ── Empty line ─────────────────────────────
+        if not stripped:
+            doc.add_paragraph()
+            i += 1
+            continue
+
+        # ── Fenced code block ```lang ──────────────
+        if stripped.startswith('```') or stripped.startswith('~~~'):
+            fence    = stripped[:3]
+            language = stripped[3:].strip()
+            i       += 1
+            code_lines = []
+
+            while i < total and not lines[i].strip().startswith(fence):
+                code_lines.append(lines[i])
+                i += 1
+
+            code = '\n'.join(code_lines)
+            add_code_block(code, language)
+            i += 1   # skip closing fence
+            continue
+
+        # ── ATX Headings # ## ### ──────────────────
+        m = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if m:
+            level = len(m.group(1))
+            text  = m.group(2).rstrip('#').strip()
+            add_heading(text, level)
+            i += 1
+            continue
+
+        # ── Setext H1 (===) ────────────────────────
+        if i + 1 < total:
+            next_line = lines[i + 1].strip()
+            if next_line and set(next_line) == {'='}:
+                add_heading(stripped, 1)
+                i += 2
+                continue
+            if next_line and set(next_line) == {'-'} and len(next_line) >= 2:
+                add_heading(stripped, 2)
+                i += 2
+                continue
+
+        # ── Horizontal rule --- *** ___ ────────────
+        if re.match(r'^[-*_]{3,}$', stripped.replace(' ', '')):
+            add_horizontal_rule()
+            i += 1
+            continue
+
+        # ── Blockquote > ───────────────────────────
+        if stripped.startswith('>'):
+            quote_lines = []
+            while i < total and lines[i].strip().startswith('>'):
+                quote_lines.append(
+                    lines[i].strip().lstrip('>').strip()
+                )
+                i += 1
+            add_blockquote(' '.join(quote_lines))
+            continue
+
+        # ── Table | col | col | ────────────────────
+        if stripped.startswith('|') and '|' in stripped[1:]:
+            table_lines = []
+            while i < total and lines[i].strip().startswith('|'):
+                table_lines.append(lines[i])
+                i += 1
+            add_table(table_lines)
+            continue
+
+        # ── Bullet list - * + ──────────────────────
+        m = re.match(r'^(\s*)[-*+]\s+(\[[ xX]\]\s+)?(.+)$', line)
+        if m:
+            indent  = len(m.group(1))
+            level   = indent // 2
+            checked = None
+            text    = m.group(3)
+
+            if m.group(2):
+                checked = m.group(2).strip()[1].lower() == 'x'
+
+            add_list_item(text, ordered=False, level=level, checked=checked)
+            i += 1
+            continue
+
+        # ── Numbered list 1. 2. ────────────────────
+        m = re.match(r'^(\s*)\d+[.)]\s+(.+)$', line)
+        if m:
+            indent = len(m.group(1))
+            level  = indent // 3
+            text   = m.group(2)
+            add_list_item(text, ordered=True, level=level)
+            i += 1
+            continue
+
+        # ── Regular paragraph ──────────────────────
+        # Collect continuation lines
+        para_lines = [stripped]
+        i += 1
+
+        while i < total:
+            next_stripped = lines[i].strip()
+
+            # Stop at blank line or block-level elements
+            if not next_stripped:
+                break
+            if next_stripped.startswith(('#', '>', '|', '```', '~~~', '-', '*', '+')):
+                break
+            if re.match(r'^\d+[.)]\s', next_stripped):
+                break
+            if re.match(r'^[-*_]{3,}$', next_stripped.replace(' ', '')):
+                break
+
+            para_lines.append(next_stripped)
+            i += 1
+
+        full_text = ' '.join(para_lines)
+        add_paragraph(full_text)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read()

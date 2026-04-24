@@ -5007,3 +5007,142 @@ class MarkdownToExcelView(APIView):
         response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
         response["Content-Length"] = len(xlsx_bytes)
         return response
+
+
+class ExcelToMarkdownView(APIView):
+    """
+    POST /api/convert/excel-to-markdown/
+    Upload Excel file (.xlsx/.xls) → returns Markdown.
+
+    Form fields:
+        file           : Excel file (.xlsx / .xls)         (required)
+        sheet_name     : specific sheet name               (default: all)
+        max_rows       : max rows per sheet 1-10000        (default: 1000)
+        include_stats  : true | false                      (default: true)
+        include_toc    : true | false                      (default: true)
+        column_align   : left | center | right             (default: left)
+        encoding       : utf-8 | ascii | latin-1           (default: utf-8)
+        output         : json | file                       (default: json)
+        output_filename: custom output filename            (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        sheet_name = request.data.get("sheet_name", None)
+        max_rows = request.data.get("max_rows", "1000")
+        include_stats = request.data.get("include_stats", "true")
+        include_toc = request.data.get("include_toc", "true")
+        column_align = request.data.get("column_align", "left")
+        encoding = request.data.get("encoding", "utf-8")
+        output = request.data.get("output", "json")
+        output_filename = request.data.get("output_filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+
+        if not file.name.lower().endswith((".xlsx", ".xls")):
+            return Response(
+                {"error": "Only .xlsx or .xls files are accepted."},
+                status=400,
+            )
+
+        if column_align not in ("left", "center", "right"):
+            return Response(
+                {"error": "column_align must be: left, center, or right."},
+                status=400,
+            )
+
+        if output not in ("json", "file"):
+            return Response(
+                {"error": "output must be: json or file."},
+                status=400,
+            )
+
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse integers ─────────────────────────
+        try:
+            max_rows = int(max_rows)
+            if not (1 <= max_rows <= 10_000):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "max_rows must be an integer between 1 and 10,000."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_stats = to_bool(include_stats)
+        include_toc = to_bool(include_toc)
+
+        # ── Output filename ───────────────────────
+        if not output_filename:
+            output_filename = (
+                file.name.replace(".xlsx", ".md")
+                .replace(".xls", ".md")
+                .replace(".XLSX", ".md")
+                .replace(".XLS", ".md")
+            )
+        if not output_filename.endswith(".md"):
+            output_filename += ".md"
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = excel_to_markdown(
+                file,
+                sheet_name=sheet_name,
+                max_rows=max_rows,
+                include_stats=include_stats,
+                include_toc=include_toc,
+                column_align=column_align,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output: file download ──────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["markdown"].encode(encoding),
+                content_type=f"text/markdown; charset={encoding}",
+            )
+            response["Content-Disposition"] = (
+                f'attachment; filename="{output_filename}"'
+            )
+            response["Content-Length"] = len(result["markdown"].encode(encoding))
+            response["X-Total-Sheets"] = result["total_sheets"]
+            response["X-Total-Tables"] = result["total_tables"]
+            response["X-Word-Count"] = result["word_count"]
+            response["X-Char-Count"] = result["char_count"]
+            return response
+
+        # ── Output: JSON response (default) ────────
+        return Response(
+            {
+                "markdown": result["markdown"],
+                "sheets": result["sheets"],
+                "total_sheets": result["total_sheets"],
+                "total_tables": result["total_tables"],
+                "word_count": result["word_count"],
+                "char_count": result["char_count"],
+                "encoding": result["encoding"],
+            }
+        )

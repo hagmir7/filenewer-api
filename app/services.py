@@ -7133,8 +7133,6 @@ def word_to_markdown(
     }
 
 
-
-
 def markdown_to_word(
     source,
     filename      : str   = 'document.md',
@@ -7728,13 +7726,6 @@ def markdown_to_word(
     return buffer.read()
 
 
-
-
-
-
-
-
-
 def markdown_to_excel(
     source,
     filename      : str  = 'document.md',
@@ -7816,16 +7807,33 @@ def markdown_to_excel(
         cell.alignment = Alignment(vertical='center', wrap_text=True)
         cell.border    = thin_border
 
+    # ✅ Fixed — skips merged cells safely
     def auto_fit_columns(ws, min_width=8, max_width=60):
-        for col_cells in ws.columns:
-            max_len = 0
-            col_letter = col_cells[0].column_letter
-            for cell in col_cells:
-                if cell.value:
-                    max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = min(
-                max(max_len + 4, min_width), max_width
-            )
+        from openpyxl.cell.cell import MergedCell
+
+        col_widths = {}
+
+        for row in ws.iter_rows():
+            for cell in row:
+                # ── Skip merged cells ──────────────────
+                if isinstance(cell, MergedCell):
+                    continue
+                if cell.column_letter is None:
+                    continue
+
+                col_letter = cell.column_letter
+                length     = len(str(cell.value)) if cell.value is not None else 0
+
+                if col_letter not in col_widths:
+                    col_widths[col_letter] = min_width
+
+                col_widths[col_letter] = max(
+                    col_widths[col_letter],
+                    min(length + 4, max_width),
+                )
+
+        for col_letter, width in col_widths.items():
+            ws.column_dimensions[col_letter].width = width
 
     def strip_md_inline(text: str) -> str:
         """Strip inline markdown for clean Excel display."""
@@ -8307,3 +8315,246 @@ def markdown_to_excel(
     wb.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
+
+def excel_to_markdown(
+    source,
+    sheet_name: str = None,
+    max_rows: int = 1000,
+    include_stats: bool = True,
+    include_toc: bool = True,
+    column_align: str = "left",
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Convert Excel (.xlsx/.xls) → Markdown text.
+
+    Args:
+        source        : uploaded file object OR raw bytes
+        sheet_name    : specific sheet name (None = all sheets)
+        max_rows      : max rows per sheet             (default: 1000)
+        include_stats : include sheet stats header     (default: True)
+        include_toc   : include table of contents      (default: True)
+        column_align  : left | center | right          (default: left)
+        encoding      : output encoding               (default: utf-8)
+
+    Returns:
+        {
+            'markdown'     : str,
+            'sheets'       : list,
+            'total_sheets' : int,
+            'total_tables' : int,
+            'word_count'   : int,
+            'char_count'   : int,
+        }
+    """
+    import math
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        filename = getattr(source, "name", "document.xlsx")
+    elif isinstance(source, bytes):
+        raw = source
+        filename = "document.xlsx"
+    else:
+        raise ValueError("source must be a file object or bytes.")
+
+    if not raw:
+        raise ValueError("Empty file.")
+
+    # ── Open Excel ────────────────────────────────
+    try:
+        xls = pd.ExcelFile(io.BytesIO(raw))
+    except Exception as e:
+        raise ValueError(f"Cannot open Excel file: {e}")
+
+    available_sheets = xls.sheet_names
+
+    # ── Select sheets ──────────────────────────────
+    if sheet_name is not None:
+        if sheet_name not in available_sheets:
+            raise ValueError(
+                f'Sheet "{sheet_name}" not found. ' f"Available: {available_sheets}"
+            )
+        sheets_to_convert = [sheet_name]
+    else:
+        sheets_to_convert = available_sheets
+
+    # ── Column alignment ───────────────────────────
+    align_map = {
+        "left": ":---",
+        "center": ":---:",
+        "right": "---:",
+    }
+    align_sep = align_map.get(column_align, ":---")
+
+    # ── Helper: value formatter ────────────────────
+    def format_cell(value) -> str:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return ""
+        if isinstance(value, float):
+            if value == int(value):
+                return str(int(value))
+            return str(round(value, 6))
+        return str(value).strip()
+
+    def escape_pipe(text: str) -> str:
+        return text.replace("|", "\\|").replace("\n", " ").replace("\r", "")
+
+    # ── Process each sheet ─────────────────────────
+    md_sections = []
+    sheets_info = []
+    total_tables = 0
+
+    for sheet in sheets_to_convert:
+        try:
+            df = pd.read_excel(
+                xls,
+                sheet_name=sheet,
+                nrows=max_rows,
+                dtype=str,
+                keep_default_na=False,
+            )
+        except Exception as e:
+            md_sections.append(f"## {sheet}\n\n> Error reading sheet: {e}\n")
+            continue
+
+        # ── Clean ──────────────────────────────────
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.fillna("")
+
+        rows = len(df)
+        cols = len(df.columns)
+        total_tables += 1
+
+        # ── Sheet stats ────────────────────────────
+        sheets_info.append(
+            {
+                "name": sheet,
+                "rows": rows,
+                "cols": cols,
+            }
+        )
+
+        section_lines = []
+
+        # ── Sheet heading ──────────────────────────
+        section_lines.append(f"## {sheet}")
+        section_lines.append("")
+
+        # ── Stats block ────────────────────────────
+        if include_stats:
+            section_lines.append(
+                f"> **Rows:** {rows} | " f"**Columns:** {cols} | " f"**Sheet:** {sheet}"
+            )
+            section_lines.append("")
+
+        # ── Empty sheet ────────────────────────────
+        if rows == 0:
+            section_lines.append("*This sheet is empty.*")
+            section_lines.append("")
+            md_sections.append("\n".join(section_lines))
+            continue
+
+        # ── Build markdown table ───────────────────
+        # Headers
+        headers = [escape_pipe(format_cell(c)) for c in df.columns]
+        header_row = "| " + " | ".join(headers) + " |"
+        sep_row = "| " + " | ".join([align_sep] * cols) + " |"
+
+        section_lines.append(header_row)
+        section_lines.append(sep_row)
+
+        # Data rows
+        for _, row in df.iterrows():
+            cells = [escape_pipe(format_cell(v)) for v in row]
+            data_row = "| " + " | ".join(cells) + " |"
+            section_lines.append(data_row)
+
+        section_lines.append("")
+
+        # ── Column stats ──────────────────────────
+        if include_stats:
+            section_lines.append("### Column Statistics")
+            section_lines.append("")
+            section_lines.append("| Column | Type | Unique | Empty |")
+            section_lines.append("| :--- | :--- | ---: | ---: |")
+
+            for col in df.columns:
+                series = df[col]
+                numeric = pd.to_numeric(series, errors="coerce")
+                is_numeric = numeric.notna().sum() > len(series) * 0.5
+                col_type = "Numeric" if is_numeric else "Text"
+                unique = series.nunique()
+                empty = (series.str.strip() == "").sum()
+
+                stat_row = (
+                    f"| {escape_pipe(col)} "
+                    f"| {col_type} "
+                    f"| {unique} "
+                    f"| {empty} |"
+                )
+                section_lines.append(stat_row)
+
+                if is_numeric and not numeric.isna().all():
+                    section_lines.append(
+                        f"| ↳ *min: {round(float(numeric.min()), 2)}, "
+                        f"max: {round(float(numeric.max()), 2)}, "
+                        f"mean: {round(float(numeric.mean()), 2)}, "
+                        f"sum: {round(float(numeric.sum()), 2)}* "
+                        f"| | | |"
+                    )
+
+            section_lines.append("")
+
+        md_sections.append("\n".join(section_lines))
+
+    # ── Build full markdown ────────────────────────
+    parts = []
+
+    # ── Document header ────────────────────────────
+    parts.append(f'# {filename.replace(".xlsx","").replace(".xls","")}')
+    parts.append("")
+    parts.append(
+        f"> **File:** {filename} | "
+        f"**Sheets:** {len(sheets_to_convert)} | "
+        f'**Total rows:** {sum(s["rows"] for s in sheets_info)}'
+    )
+    parts.append("")
+
+    # ── Table of contents ─────────────────────────
+    if include_toc and len(sheets_to_convert) > 1:
+        parts.append("## Contents")
+        parts.append("")
+        for s in sheets_info:
+            slug = s["name"].lower().replace(" ", "-")
+            slug = "".join(c for c in slug if c.isalnum() or c == "-")
+            parts.append(
+                f'- [{s["name"]}](#{slug}) ' f'— {s["rows"]} rows × {s["cols"]} cols'
+            )
+        parts.append("")
+        parts.append("---")
+        parts.append("")
+
+    # ── Sheet sections ─────────────────────────────
+    parts.extend(md_sections)
+
+    # ── Join ──────────────────────────────────────
+    import re
+
+    markdown = "\n".join(parts)
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
+
+    word_count = len(markdown.split())
+    char_count = len(markdown)
+
+    return {
+        "markdown": markdown,
+        "sheets": sheets_info,
+        "total_sheets": len(sheets_info),
+        "total_tables": total_tables,
+        "word_count": word_count,
+        "char_count": char_count,
+        "encoding": encoding,
+    }

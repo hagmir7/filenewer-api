@@ -4641,7 +4641,6 @@ class CSVTextViewerView(APIView):
         return Response(result)
 
 
-
 class WordToMarkdownView(APIView):
     """
     POST /api/convert/word-to-markdown/
@@ -4772,7 +4771,6 @@ class WordToMarkdownView(APIView):
                 "encoding": result["encoding"],
             }
         )
-
 
 
 class MarkdownToWordView(APIView):
@@ -4909,4 +4907,103 @@ class MarkdownToWordView(APIView):
             f'attachment; filename="{output_filename}"'
         )
         response['Content-Length'] = len(docx_bytes)
+        return response
+
+
+class MarkdownToExcelView(APIView):
+    """
+    POST /api/convert/markdown-to-excel/
+    Upload .md file or send raw markdown → returns .xlsx file.
+
+    Form fields (file upload):
+        file          : .md / .markdown / .txt file     (required)
+        sheet_name    : default sheet name              (default: Sheet1)
+        encoding      : utf-8 | ascii | latin-1         (default: utf-8)
+        include_stats : true | false                    (default: true)
+        output_filename: custom output filename         (optional)
+
+    JSON body (raw markdown):
+        {
+            "markdown"      : "# Hello\n\n| col | col |\n|-----|-----|\n| a   | b   |",
+            "sheet_name"    : "Sheet1",
+            "encoding"      : "utf-8",
+            "include_stats" : true,
+            "output_filename": "output.xlsx"
+        }
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file", None)
+        markdown_text = request.data.get("markdown", None)
+        sheet_name = request.data.get("sheet_name", "Sheet1")
+        encoding = request.data.get("encoding", "utf-8")
+        include_stats = request.data.get("include_stats", True)
+        output_filename = request.data.get("output_filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file and not markdown_text:
+            return Response(
+                {"error": 'Provide either "file" (.md) or "markdown" (raw string).'},
+                status=400,
+            )
+
+        if file and not file.name.lower().endswith((".md", ".markdown", ".txt")):
+            return Response(
+                {"error": "Only .md, .markdown, or .txt files are accepted."},
+                status=400,
+            )
+
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_stats = to_bool(include_stats)
+
+        # ── Source + filename ──────────────────────
+        source = file if file else str(markdown_text)
+        src_name = file.name if file else "document.md"
+
+        if not output_filename:
+            output_filename = (
+                src_name.replace(".md", ".xlsx")
+                .replace(".markdown", ".xlsx")
+                .replace(".txt", ".xlsx")
+            )
+        if not output_filename.endswith(".xlsx"):
+            output_filename += ".xlsx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            xlsx_bytes = markdown_to_excel(
+                source,
+                filename=src_name,
+                sheet_name=sheet_name,
+                encoding=encoding,
+                include_stats=include_stats,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return .xlsx download ──────────────────
+        response = HttpResponse(
+            xlsx_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument" ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(xlsx_bytes)
         return response

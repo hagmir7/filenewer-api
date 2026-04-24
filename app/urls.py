@@ -61,6 +61,7 @@ urlpatterns = [
     path('tools/csv-viewer-text', CSVTextViewerView.as_view(), name='csv-viewer-text'),
     path('tools/word-to-markdown', WordToMarkdownView.as_view(), name='word-to-markdown'),
     path('tools/markdown-to-word', MarkdownToWordView.as_view(), name='markdown-to-word'),
+    path('tools/markdown-to-excel', MarkdownToExcelView.as_view(), name='markdown-to-excel'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

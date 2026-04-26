@@ -41,6 +41,7 @@ from .services.json_service import (
     json_to_excel,
     json_to_excel_multisheets,
     format_json,
+    json_to_yaml,
 )
 from .services.excel_service import (
     excel_to_csv,
@@ -5219,5 +5220,213 @@ class ExcelToMarkdownView(APIView):
                 "word_count": result["word_count"],
                 "char_count": result["char_count"],
                 "encoding": result["encoding"],
+            }
+        )
+
+
+
+class JSONFileToYAMLView(APIView):
+    """
+    POST /api/convert/json-file-to-yaml/
+    Upload a .json file → returns YAML.
+
+    Form fields:
+        file          : JSON file                          (required)
+        indent        : YAML indentation spaces 1-8        (default: 2)
+        sort_keys     : true | false                       (default: false)
+        allow_unicode : true | false                       (default: true)
+        default_flow  : true | false                       (default: false)
+        output        : text | file                        (default: text)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        indent = request.data.get("indent", "2")
+        sort_keys = request.data.get("sort_keys", "false")
+        allow_unicode = request.data.get("allow_unicode", "true")
+        default_flow = request.data.get("default_flow", "false")
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith(".json"):
+            return Response(
+                {"error": "Only .json files are accepted."},
+                status=400,
+            )
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be: text or file."},
+                status=400,
+            )
+
+        # ── Parse ─────────────────────────────────
+        try:
+            indent = int(indent)
+            if not (1 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 1 and 8."},
+                status=400,
+            )
+
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        sort_keys = to_bool(sort_keys)
+        allow_unicode = to_bool(allow_unicode)
+        default_flow = to_bool(default_flow)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = json_to_yaml(
+                file,
+                indent=indent,
+                sort_keys=sort_keys,
+                allow_unicode=allow_unicode,
+                default_flow=default_flow,
+            )
+        except json.JSONDecodeError as e:
+            return Response(
+                {"error": f"Invalid JSON: {e}"},
+                status=400,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            yaml_filename = file.name.replace(".json", ".yaml")
+            response = HttpResponse(
+                result["yaml"],
+                content_type="application/x-yaml",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{yaml_filename}"'
+            response["Content-Length"] = result["size_yaml"]
+            return response
+
+        return Response(
+            {
+                "yaml": result["yaml"],
+                "type": result["type"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "depth": result["depth"],
+                "size_original_kb": result["size_original_kb"],
+                "size_yaml_kb": result["size_yaml_kb"],
+                "sort_keys": result["sort_keys"],
+                "indent": result["indent"],
+            }
+        )
+
+
+class JSONTextToYAMLView(APIView):
+    """
+    POST /api/convert/json-text-to-yaml/
+    Send raw JSON → returns YAML.
+
+    JSON body:
+        {
+            "json"        : {"key": "value"} or "[...]" or "{...}",
+            "indent"      : 2,
+            "sort_keys"   : false,
+            "allow_unicode": true,
+            "default_flow": false,
+            "output"      : "text"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        json_input = request.data.get("json")
+        indent = request.data.get("indent", 2)
+        sort_keys = request.data.get("sort_keys", False)
+        allow_unicode = request.data.get("allow_unicode", True)
+        default_flow = request.data.get("default_flow", False)
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if json_input is None:
+            return Response(
+                {"error": '"json" field is required.'},
+                status=400,
+            )
+
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be: text or file."},
+                status=400,
+            )
+
+        # ── Parse indent ──────────────────────────
+        try:
+            indent = int(indent)
+            if not (1 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 1 and 8."},
+                status=400,
+            )
+
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        sort_keys = to_bool(sort_keys)
+        allow_unicode = to_bool(allow_unicode)
+        default_flow = to_bool(default_flow)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = json_to_yaml(
+                json_input,
+                indent=indent,
+                sort_keys=sort_keys,
+                allow_unicode=allow_unicode,
+                default_flow=default_flow,
+            )
+        except json.JSONDecodeError as e:
+            return Response(
+                {"error": f"Invalid JSON: {e}"},
+                status=400,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["yaml"],
+                content_type="application/x-yaml",
+            )
+            response["Content-Disposition"] = 'attachment; filename="output.yaml"'
+            response["Content-Length"] = result["size_yaml"]
+            return response
+
+        return Response(
+            {
+                "yaml": result["yaml"],
+                "type": result["type"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "depth": result["depth"],
+                "size_original_kb": result["size_original_kb"],
+                "size_yaml_kb": result["size_yaml_kb"],
+                "sort_keys": result["sort_keys"],
+                "indent": result["indent"],
             }
         )

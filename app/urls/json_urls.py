@@ -6,6 +6,8 @@ from ..views import (
     JSONTextToExcelView,
     JSONFileFormatterView,
     JSONTextFormatterView,
+    JSONFileToYAMLView,
+    JSONTextToYAMLView,
 )
 
 urlpatterns = [
@@ -15,4 +17,6 @@ urlpatterns = [
     path("tools/json-text-to-excel", JSONTextToExcelView.as_view(), name="json-text-to-excel"),
     path("tools/format-json-file", JSONFileFormatterView.as_view(), name="json-file-formatter"),
     path("tools/format-json-text", JSONTextFormatterView.as_view(), name="json-text-formatter"),
+    path('tools/json-file-to-yaml', JSONFileToYAMLView.as_view(), name='json-file-to-yaml'),
+    path('tools/json-text-to-yaml', JSONTextToYAMLView.as_view(), name='json-text-to-yaml'),
 ]

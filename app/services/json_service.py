@@ -285,3 +285,115 @@ def format_json(
         "sorted_keys": sort_keys,
         "indent": indent,
     }
+
+
+def json_to_yaml(
+    source,
+    indent: int = 2,
+    sort_keys: bool = False,
+    allow_unicode: bool = True,
+    default_flow: bool = False,
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Convert JSON (file, text, dict, list) → YAML string.
+
+    Args:
+        source        : file object | raw JSON string | dict | list
+        indent        : YAML indentation spaces        (default: 2)
+        sort_keys     : sort keys alphabetically       (default: False)
+        allow_unicode : allow unicode characters       (default: True)
+        default_flow  : use flow style                 (default: False)
+        encoding      : output encoding               (default: utf-8)
+
+    Returns:
+        {
+            'yaml'         : str,
+            'input_type'   : str,
+            'key_count'    : int,
+            'depth'        : int,
+            'size_original': int,
+            'size_yaml'    : int,
+        }
+    """
+    import yaml
+
+    # ── Read source ───────────────────────────────
+    input_type = "text"
+
+    if hasattr(source, "read"):
+        raw = source.read()
+        input_type = "file"
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+        data = json.loads(raw)
+
+    elif isinstance(source, (dict, list)):
+        data = source
+        input_type = "object"
+        raw = json.dumps(source)
+
+    elif isinstance(source, str):
+        raw = source.strip()
+        data = json.loads(raw)
+
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+        input_type = "bytes"
+        data = json.loads(raw)
+
+    else:
+        raise ValueError("source must be a string, file, bytes, dict, or list.")
+
+    if data is None:
+        raise ValueError("Input is null/None — nothing to convert.")
+
+    # ── Convert to YAML ───────────────────────────
+    yaml_str = yaml.dump(
+        data,
+        indent=indent,
+        sort_keys=sort_keys,
+        allow_unicode=allow_unicode,
+        default_flow_style=default_flow,
+        explicit_start=False,
+        explicit_end=False,
+    )
+
+    # ── Analyze structure ─────────────────────────
+    def get_depth(obj, level=0):
+        if isinstance(obj, dict):
+            if not obj:
+                return level
+            return max(get_depth(v, level + 1) for v in obj.values())
+        if isinstance(obj, list):
+            if not obj:
+                return level
+            return max(get_depth(i, level + 1) for i in obj)
+        return level
+
+    def count_keys(obj):
+        if isinstance(obj, dict):
+            return len(obj) + sum(count_keys(v) for v in obj.values())
+        if isinstance(obj, list):
+            return sum(count_keys(i) for i in obj)
+        return 0
+
+    return {
+        "yaml": yaml_str,
+        "input_type": input_type,
+        "type": (
+            "object"
+            if isinstance(data, dict)
+            else "array" if isinstance(data, list) else "other"
+        ),
+        "key_count": count_keys(data),
+        "item_count": len(data) if isinstance(data, (dict, list)) else 1,
+        "depth": get_depth(data),
+        "size_original": len(raw),
+        "size_yaml": len(yaml_str),
+        "size_original_kb": round(len(raw) / 1024, 2),
+        "size_yaml_kb": round(len(yaml_str) / 1024, 2),
+        "sort_keys": sort_keys,
+        "indent": indent,
+        "encoding": encoding,
+    }

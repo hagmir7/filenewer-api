@@ -1,0 +1,34 @@
+from django.urls import path
+from ..views import (
+    PDFToWordView,
+    PDFToJPGView,
+    PDFToExcelView,
+    PDFToPNGView,
+    EncryptPDFView,
+    DecryptPDFView,
+    CompressPDFView,
+    PDFInfoView,
+    RotatePDFView,
+    PDFPageInfoView,
+    WatermarkPDFView,
+    MergePDFView,
+    SplitPDFView,
+    WordToPDFView,
+)
+
+urlpatterns = [
+    path("tools/pdf-to-word", PDFToWordView.as_view(), name="pdf-to-word"),
+    path("tools/pdf-to-jpg", PDFToJPGView.as_view(), name="pdf-to-jpg"),
+    path("tools/pdf-to-excel", PDFToExcelView.as_view(), name="pdf-to-excel"),
+    path("tools/pdf-to-png", PDFToPNGView.as_view(), name="pdf-to-png"),
+    path("tools/pdf-encrypt", EncryptPDFView.as_view(), name="pdf-encrypt"),
+    path("tools/pdf-decrypt", DecryptPDFView.as_view(), name="pdf-decrypt"),
+    path("tools/pdf-compress", CompressPDFView.as_view(), name="pdf-compress"),
+    path("tools/pdf-info", PDFInfoView.as_view(), name="pdf-info"),
+    path("tools/pdf-rotate", RotatePDFView.as_view(), name="pdf-rotate"),
+    path("tools/pdf-pages", PDFPageInfoView.as_view(), name="pdf-pages"),
+    path("tools/pdf-watermark", WatermarkPDFView.as_view(), name="pdf-watermark"),
+    path("tools/pdf-merge", MergePDFView.as_view(), name="pdf-merge"),
+    path("tools/pdf-split", SplitPDFView.as_view(), name="pdf-split"),
+    path("tools/word-to-pdf", WordToPDFView.as_view(), name="word-to-pdf"),
+]

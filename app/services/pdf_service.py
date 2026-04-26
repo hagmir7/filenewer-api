@@ -1,0 +1,1691 @@
+"""
+PDF service functions.
+"""
+
+import io
+import os
+import re
+import logging
+from pathlib import Path
+
+import pdfplumber
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+# PDF TO WORD
+# ─────────────────────────────────────────────
+
+
+def _looks_like_heading(text: str) -> bool:
+    """Heuristic: short, no period at end, possible ALL CAPS."""
+    text = text.strip()
+    if not text:
+        return False
+    if len(text) > 120:
+        return False
+    if text.endswith("."):
+        return False
+    if text.isupper() and len(text) > 3:
+        return True
+    if re.match(r"^(\d+[\.\)]\s+|\d+\.\d+\s+)", text):  # "1. Title" / "1.2 Section"
+        return True
+    return False
+
+
+def _add_table_to_doc(doc: Document, table_data: list[list]) -> None:
+    """Add a pdfplumber table into the Word document."""
+    if not table_data:
+        return
+
+    rows = len(table_data)
+    cols = max(len(row) for row in table_data)
+    if rows == 0 or cols == 0:
+        return
+
+    word_table = doc.add_table(rows=rows, cols=cols)
+    word_table.style = "Table Grid"
+
+    for r_idx, row in enumerate(table_data):
+        for c_idx, cell_text in enumerate(row):
+            if c_idx >= cols:
+                break
+            cell = word_table.cell(r_idx, c_idx)
+            cell.text = str(cell_text) if cell_text is not None else ""
+            # Bold first row (header)
+            if r_idx == 0:
+                for run in cell.paragraphs[0].runs:
+                    run.bold = True
+
+
+def convert_pdf_to_docx(pdf_bytes: bytes) -> bytes:
+    """
+    Convert PDF bytes → DOCX bytes.
+
+    Returns the raw bytes of the generated .docx file.
+    """
+    doc = Document()
+
+    # ── Default style tweaks ──────────────────
+    style = doc.styles["Normal"]
+    font = style.font
+    font.name = "Calibri"
+    font.size = Pt(11)
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        total_pages = len(pdf.pages)
+        logger.info("Converting PDF: %d page(s)", total_pages)
+
+        for page_num, page in enumerate(pdf.pages, start=1):
+            # ── Extract tables first ─────────────
+            tables = page.extract_tables() or []
+            table_bboxes = []
+
+            for table_data in tables:
+                if table_data:
+                    _add_table_to_doc(doc, table_data)
+                    doc.add_paragraph()  # breathing room after table
+
+            # ── Extract text (excluding table regions) ──
+            # Crop away table areas to avoid duplicating content
+            cropped_page = page
+            for table in page.find_tables():
+                try:
+                    cropped_page = cropped_page.outside_bbox(table.bbox)
+                except Exception:
+                    pass  # some versions don't support outside_bbox; fall through
+
+            raw_text = cropped_page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+
+            if not raw_text.strip() and not tables:
+                # Blank page – add a soft separator
+                doc.add_paragraph()
+                continue
+
+            for line in raw_text.splitlines():
+                line = line.strip()
+                if not line:
+                    doc.add_paragraph()
+                    continue
+
+                if _looks_like_heading(line):
+                    heading_level = 1 if line.isupper() else 2
+                    doc.add_heading(line, level=heading_level)
+                else:
+                    para = doc.add_paragraph(line)
+                    para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+            # ── Page break between pages (except last) ──
+            if page_num < total_pages:
+                doc.add_page_break()
+
+    # ── Serialize to bytes ────────────────────
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def pdf_to_excel(source, password: str = None) -> bytes:
+    """
+    Convert PDF (file or bytes) → Excel bytes.
+
+    Strategy:
+        1. Extract tables  → each table gets its own sheet
+        2. Extract text    → one 'Text' sheet with all plain text
+        3. Style headers   → bold white on blue, alternating rows, auto-width
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : PDF password if encrypted (default: None)
+
+    Returns:
+        Raw bytes of the generated .xlsx file
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl import Workbook
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Styles ────────────────────────────────────
+    def make_header_style():
+        return {
+            "font": Font(bold=True, color="FFFFFF", size=11),
+            "fill": PatternFill(fill_type="solid", fgColor="2E75B6"),
+            "align": Alignment(horizontal="center", vertical="center", wrap_text=True),
+            "border": Border(
+                left=Side(style="thin"),
+                right=Side(style="thin"),
+                top=Side(style="thin"),
+                bottom=Side(style="thin"),
+            ),
+        }
+
+    def apply_header(ws):
+        style = make_header_style()
+        for cell in ws[1]:
+            cell.font = style["font"]
+            cell.fill = style["fill"]
+            cell.alignment = style["align"]
+            cell.border = style["border"]
+        ws.row_dimensions[1].height = 25
+
+    def apply_rows(ws):
+        thin = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+        for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            color = "DCE6F1" if row_idx % 2 == 0 else "FFFFFF"
+            for cell in row:
+                cell.fill = PatternFill(fill_type="solid", fgColor=color)
+                cell.border = thin
+                cell.alignment = Alignment(vertical="center")
+
+    def auto_fit(ws):
+        for col_cells in ws.columns:
+            max_len = max(
+                len(str(cell.value)) if cell.value is not None else 0
+                for cell in col_cells
+            )
+            ws.column_dimensions[col_cells[0].column_letter].width = min(
+                max_len + 4, 60
+            )
+
+    # ── Parse PDF ─────────────────────────────────
+    wb = Workbook()
+    wb.remove(wb.active)  # remove default empty sheet
+
+    table_count = 0
+    all_text = []
+
+    open_kwargs = {"stream": io.BytesIO(pdf_bytes)}
+    pdf_stream = io.BytesIO(pdf_bytes)
+    if password:
+        open_kwargs["password"] = password
+
+    with pdfplumber.open(pdf_stream, password=password) as pdf:
+        total_pages = len(pdf.pages)
+
+        for page_num, page in enumerate(pdf.pages, start=1):
+
+            # ── Extract tables ─────────────────────
+            tables = page.extract_tables() or []
+            for table in tables:
+                if not table:
+                    continue
+
+                # clean None cells
+                cleaned = [
+                    [str(cell).strip() if cell is not None else "" for cell in row]
+                    for row in table
+                ]
+
+                table_count += 1
+                sheet_label = f"Table_{table_count}_P{page_num}"[:31]
+                ws = wb.create_sheet(title=sheet_label)
+
+                for row in cleaned:
+                    ws.append(row)
+
+                apply_header(ws)
+                apply_rows(ws)
+                auto_fit(ws)
+                ws.freeze_panes = "A2"
+
+            # ── Extract plain text ─────────────────
+            # Exclude table regions to avoid duplication
+            cropped = page
+            for tbl in page.find_tables():
+                try:
+                    cropped = cropped.outside_bbox(tbl.bbox)
+                except Exception:
+                    pass
+
+            text = cropped.extract_text(x_tolerance=3, y_tolerance=3) or ""
+            if text.strip():
+                all_text.append(f"--- Page {page_num} ---")
+                all_text.append(text.strip())
+                all_text.append("")
+
+    # ── Text sheet ────────────────────────────────
+    if all_text:
+        ws_text = wb.create_sheet(title="Text")
+        ws_text.column_dimensions["A"].width = 100
+
+        # Header
+        ws_text.append(["Extracted Text"])
+        apply_header(ws_text)
+
+        for line in all_text:
+            ws_text.append([line])
+
+        # Light style for text rows
+        thin = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+        for row in ws_text.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                cell.border = thin
+
+    # ── Summary sheet (first sheet) ───────────────
+    ws_summary = wb.create_sheet(title="Summary", index=0)
+    ws_summary.column_dimensions["A"].width = 25
+    ws_summary.column_dimensions["B"].width = 40
+
+    summary_data = [
+        ["Property", "Value"],
+        ["Total Pages", total_pages],
+        ["Tables Found", table_count],
+        ["Has Text", "Yes" if all_text else "No"],
+        ["Sheets", wb.sheetnames.__len__()],
+    ]
+
+    for row in summary_data:
+        ws_summary.append(row)
+
+    apply_header(ws_summary)
+    apply_rows(ws_summary)
+    auto_fit(ws_summary)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def pdf_to_jpg(source, dpi: int = 200, quality: int = 85, password: str = None) -> list[dict]:
+    """
+    Convert PDF → JPG using pymupdf (no poppler / no system deps needed).
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        dpi      : image resolution (default: 200)
+        quality  : JPG quality 1-95 (default: 85)
+        password : PDF password if encrypted (default: None)
+
+    Returns:
+        list of {
+            'page'    : int,
+            'bytes'   : bytes,
+            'width'   : int,
+            'height'  : int,
+            'filename': str,
+        }
+    """
+    import fitz          # pymupdf
+    from PIL import Image
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, 'read'):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+
+    if password:
+        if not doc.authenticate(password):
+            raise ValueError('Invalid PDF password.')
+
+    # ── Convert each page → JPG ───────────────────
+    zoom   = dpi / 72        # pymupdf base DPI is 72
+    matrix = fitz.Matrix(zoom, zoom)
+
+    results = []
+
+    for page_num in range(len(doc)):
+        page    = doc[page_num]
+        pixmap  = page.get_pixmap(matrix=matrix, alpha=False)
+
+        # Pixmap → PIL Image → JPG bytes
+        image = Image.frombytes(
+            'RGB',
+            [pixmap.width, pixmap.height],
+            pixmap.samples,
+        )
+
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format  ='JPEG',
+            quality =quality,
+            optimize=True,
+        )
+        buffer.seek(0)
+        jpg_bytes = buffer.read()
+
+        results.append({
+            'page'    : page_num + 1,
+            'bytes'   : jpg_bytes,
+            'width'   : pixmap.width,
+            'height'  : pixmap.height,
+            'filename': f'page_{page_num + 1}.jpg',
+        })
+
+    doc.close()
+    return results
+
+
+# ── Arabic support ─────────────────────────────────
+try:
+    from bidi.algorithm import get_display
+    import arabic_reshaper
+
+    ARABIC_SUPPORT = True
+except ImportError:
+    ARABIC_SUPPORT = False
+
+
+def is_arabic(text: str) -> bool:
+    """Check if text contains Arabic characters."""
+    return bool(re.search(r"[؀-ۿݐ-ݿࢠ-ࣿ]", text))
+
+
+def process_arabic_text(text: str) -> str:
+    """
+    Reshape and reorder Arabic text for correct PDF rendering.
+    Arabic needs two steps:
+        1. Reshape  → connect letters correctly
+        2. Bidi     → reverse for RTL display
+    """
+    if not ARABIC_SUPPORT or not text.strip():
+        return text
+
+    try:
+        if is_arabic(text):
+            reshaped = arabic_reshaper.reshape(text)
+            return get_display(reshaped)
+        return text
+    except Exception:
+        return text
+
+
+def register_arabic_fonts(fonts_dir: str = None) -> dict:
+    """
+    Register Arabic fonts with reportlab.
+    Returns dict of available font names.
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    if fonts_dir is None:
+        # Default: fonts/ folder next to manage.py
+        fonts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts"
+        )
+
+    registered = {}
+    font_files = {
+        "Amiri": "Amiri-Regular.ttf",
+        "Amiri-Bold": "Amiri-Bold.ttf",
+        "Amiri-Italic": "Amiri-Italic.ttf",
+        "Amiri-BoldItalic": "Amiri-BoldItalic.ttf",
+    }
+
+    for font_name, font_file in font_files.items():
+        font_path = os.path.join(fonts_dir, font_file)
+        if os.path.exists(font_path):
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, font_path))
+                registered[font_name] = font_path
+            except Exception:
+                pass
+
+    return registered
+
+
+def encrypt_pdf(
+    source,
+    user_password: str = "",
+    owner_password: str = None,
+    allow_printing: bool = True,
+    allow_copying: bool = True,
+    allow_editing: bool = True,
+    allow_annotations: bool = True,
+) -> bytes:
+    """
+    Encrypt a PDF with password protection and permissions.
+
+    Args:
+        source           : uploaded file object OR raw bytes
+        user_password    : password required to open the PDF
+        owner_password   : password for full access (default: same as user)
+        allow_printing   : allow printing                (default: True)
+        allow_copying    : allow copying text            (default: True)
+        allow_editing    : allow editing                 (default: True)
+        allow_annotations: allow adding annotations      (default: True)
+
+    Returns:
+        Raw bytes of the encrypted PDF
+    """
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import NameObject
+    import pypdf.constants as pdfconst
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Validate it is a real PDF ──────────────────
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Read + Write ──────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # Check if already encrypted
+    if reader.is_encrypted:
+        raise ValueError(
+            "PDF is already encrypted. " "Please decrypt it first before re-encrypting."
+        )
+
+    writer = PdfWriter()
+
+    # ── Copy all pages ─────────────────────────────
+    for page in reader.pages:
+        writer.add_page(page)
+
+    # ── Copy metadata ──────────────────────────────
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Set owner password ─────────────────────────
+    if owner_password is None:
+        owner_password = user_password
+
+    # ── Build permissions ─────────────────────────
+    permissions = build_permissions(
+        allow_printing=allow_printing,
+        allow_copying=allow_copying,
+        allow_editing=allow_editing,
+        allow_annotations=allow_annotations,
+    )
+
+    # ── Encrypt ────────────────────────────────────
+    writer.encrypt(
+        user_password=user_password,
+        owner_password=owner_password,
+        use_128bit=True,
+        permissions_flag=permissions,
+    )
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def build_permissions(
+    allow_printing: bool = True,
+    allow_copying: bool = True,
+    allow_editing: bool = True,
+    allow_annotations: bool = True,
+) -> int:
+    """
+    Build PDF permissions flag.
+
+    PDF permission bits (128-bit RC4):
+        Bit 3  → Print
+        Bit 4  → Modify contents
+        Bit 5  → Copy / extract text
+        Bit 6  → Annotations
+        Bit 9  → Fill forms
+        Bit 10 → Extract for accessibility
+        Bit 11 → Assemble document
+        Bit 12 → Print high quality
+    """
+    # Start with base permissions (bits 1,2 always 0; rest 1)
+    permissions = 0b11111111111111111111111100000000
+
+    if not allow_printing:
+        permissions &= ~(1 << 2)  # clear bit 3
+        permissions &= ~(1 << 11)  # clear bit 12 (high quality print)
+
+    if not allow_editing:
+        permissions &= ~(1 << 3)  # clear bit 4
+        permissions &= ~(1 << 8)  # clear bit 9  (forms)
+        permissions &= ~(1 << 10)  # clear bit 11 (assemble)
+
+    if not allow_copying:
+        permissions &= ~(1 << 4)  # clear bit 5
+        permissions &= ~(1 << 9)  # clear bit 10 (accessibility)
+
+    if not allow_annotations:
+        permissions &= ~(1 << 5)  # clear bit 6
+
+    return permissions
+
+
+def decrypt_pdf(source, password: str) -> bytes:
+    """
+    Decrypt / remove password from a PDF.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : password to decrypt the PDF
+
+    Returns:
+        Raw bytes of the decrypted PDF
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # ── Check if encrypted ─────────────────────────
+    if not reader.is_encrypted:
+        raise ValueError("PDF is not encrypted.")
+
+    # ── Decrypt ────────────────────────────────────
+    result = reader.decrypt(password)
+    if result == 0:
+        raise ValueError("Wrong password. Could not decrypt PDF.")
+
+    # ── Copy to new writer (removes encryption) ────
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def get_pdf_info(source, password: str = None) -> dict:
+    """
+    Get PDF metadata and encryption info.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : password if encrypted (optional)
+
+    Returns:
+        dict with PDF info
+    """
+    from pypdf import PdfReader
+
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # ── Decrypt if needed ──────────────────────────
+    if reader.is_encrypted:
+        if not password:
+            return {
+                "encrypted": True,
+                "pages": None,
+                "metadata": None,
+                "permissions": None,
+                "message": "PDF is encrypted. Provide password to get full info.",
+            }
+        result = reader.decrypt(password)
+        if result == 0:
+            raise ValueError("Wrong password.")
+
+    # ── Collect metadata ───────────────────────────
+    meta = {}
+    if reader.metadata:
+        meta = {
+            "title": reader.metadata.get("/Title", ""),
+            "author": reader.metadata.get("/Author", ""),
+            "subject": reader.metadata.get("/Subject", ""),
+            "creator": reader.metadata.get("/Creator", ""),
+            "producer": reader.metadata.get("/Producer", ""),
+            "created": str(reader.metadata.get("/CreationDate", "")),
+            "modified": str(reader.metadata.get("/ModDate", "")),
+        }
+
+    return {
+        "encrypted": reader.is_encrypted,
+        "pages": len(reader.pages),
+        "metadata": meta,
+        "file_size": len(pdf_bytes),
+        "pdf_version": reader.pdf_header,
+    }
+
+
+def compress_pdf(
+    source,
+    compression_level: str = "medium",
+    password: str = None,
+) -> dict:
+    """
+    Compress a PDF file by reducing image quality and removing redundant data.
+
+    Args:
+        source            : uploaded file object OR raw bytes
+        compression_level : 'low' | 'medium' | 'high' | 'extreme'
+        password          : PDF password if encrypted
+
+    Compression levels:
+        low     → light compression, best quality  (image DPI: 150, quality: 85)
+        medium  → balanced compression             (image DPI: 120, quality: 72)
+        high    → aggressive compression           (image DPI: 96,  quality: 60)
+        extreme → maximum compression, low quality (image DPI: 72,  quality: 40)
+
+    Returns:
+        {
+            'bytes'            : bytes,
+            'original_size'    : int,
+            'compressed_size'  : int,
+            'reduction_percent': float,
+            'compression_level': str,
+        }
+    """
+    import fitz  # pymupdf
+    from PIL import Image
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    original_size = len(pdf_bytes)
+
+    # ── Validate PDF ──────────────────────────────
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Compression level config ───────────────────
+    levels = {
+        "low": {"dpi": 150, "quality": 85, "deflate": 3},
+        "medium": {"dpi": 120, "quality": 72, "deflate": 6},
+        "high": {"dpi": 96, "quality": 60, "deflate": 7},
+        "extreme": {"dpi": 72, "quality": 40, "deflate": 9},
+    }
+
+    if compression_level not in levels:
+        raise ValueError(
+            f'Invalid compression_level: "{compression_level}". '
+            f"Must be one of: {list(levels.keys())}"
+        )
+
+    config = levels[compression_level]
+    dpi = config["dpi"]
+    quality = config["quality"]
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    if doc.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if not doc.authenticate(password):
+            raise ValueError("Wrong password.")
+
+    # ── Step 1: Compress images on each page ───────
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+
+        # Get all images on this page
+        image_list = page.get_images(full=True)
+
+        for img_info in image_list:
+            xref = img_info[0]  # image reference number
+            base_image = doc.extract_image(xref)
+
+            if not base_image:
+                continue
+
+            img_bytes = base_image["image"]
+            img_ext = base_image["ext"]
+
+            # Skip non-raster images (masks, etc.)
+            if img_ext not in ("jpeg", "jpg", "png", "bmp", "tiff"):
+                continue
+
+            try:
+                # ── Open image with PIL ───────────
+                pil_img = Image.open(io.BytesIO(img_bytes))
+
+                # Convert to RGB if needed
+                if pil_img.mode in ("RGBA", "P", "LA"):
+                    pil_img = pil_img.convert("RGB")
+                elif pil_img.mode == "L":
+                    pass  # keep grayscale as is
+
+                # ── Resize if DPI is too high ──────
+                orig_w, orig_h = pil_img.size
+                if orig_w > dpi * 8 or orig_h > dpi * 11:
+                    scale = min(dpi * 8 / orig_w, dpi * 11 / orig_h)
+                    new_w = max(1, int(orig_w * scale))
+                    new_h = max(1, int(orig_h * scale))
+                    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+
+                # ── Save as JPEG with compression ──
+                img_buffer = io.BytesIO()
+                pil_img.save(
+                    img_buffer,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                )
+                img_buffer.seek(0)
+                new_img_bytes = img_buffer.read()
+
+                # Only replace if new image is smaller
+                if len(new_img_bytes) < len(img_bytes):
+                    doc.update_stream(xref, new_img_bytes)
+
+            except Exception:
+                continue  # skip problematic images silently
+
+    # ── Step 2: Clean and compress PDF structure ───
+    buffer = io.BytesIO()
+    doc.save(
+        buffer,
+        garbage=4,  # remove unused objects (0-4, 4=most aggressive)
+        deflate=True,  # compress streams
+        deflate_images=True,  # compress images
+        deflate_fonts=True,  # compress fonts
+        clean=True,  # clean content streams
+        pretty=False,  # no pretty printing (saves space)
+        linear=False,  # no linearization (saves space)
+    )
+    doc.close()
+
+    buffer.seek(0)
+    compressed_bytes = buffer.read()
+    compressed_size = len(compressed_bytes)
+
+    # ── Calculate reduction ────────────────────────
+    reduction = (
+        (original_size - compressed_size) / original_size * 100
+        if original_size > 0
+        else 0
+    )
+
+    return {
+        "bytes": compressed_bytes,
+        "original_size": original_size,
+        "compressed_size": compressed_size,
+        "reduction_percent": round(reduction, 2),
+        "compression_level": compression_level,
+        "original_size_kb": round(original_size / 1024, 2),
+        "compressed_size_kb": round(compressed_size / 1024, 2),
+        "original_size_mb": round(original_size / (1024 * 1024), 2),
+        "compressed_size_mb": round(compressed_size / (1024 * 1024), 2),
+    }
+
+
+def pdf_to_png(
+    source,
+    dpi: int = 200,
+    pages: list = None,
+    password: str = None,
+) -> list[dict]:
+    """
+    Convert PDF (file or bytes) → list of PNG images (one per page).
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        dpi      : image resolution (default: 200)
+        pages    : list of page numbers to convert (1-based)
+                   None = convert all pages
+        password : PDF password if encrypted
+
+    Returns:
+        list of {
+            'page'    : int,
+            'bytes'   : bytes,
+            'width'   : int,
+            'height'  : int,
+            'filename': str,
+        }
+    """
+    import fitz  # pymupdf
+    from PIL import Image
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Validate PDF ──────────────────────────────
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    if doc.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if not doc.authenticate(password):
+            raise ValueError("Wrong password.")
+
+    total_pages = len(doc)
+
+    # ── Validate pages ────────────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"PDF has {total_pages} pages (1-{total_pages})."
+            )
+        pages_to_convert = pages
+    else:
+        pages_to_convert = list(range(1, total_pages + 1))
+
+    # ── Convert each page → PNG ───────────────────
+    zoom = dpi / 72  # pymupdf base DPI is 72
+    matrix = fitz.Matrix(zoom, zoom)
+    results = []
+
+    for page_num in pages_to_convert:
+        page = doc[page_num - 1]  # 0-based index
+
+        # ── Render page → pixmap ──────────────────
+        pixmap = page.get_pixmap(
+            matrix=matrix,
+            alpha=True,  # PNG supports transparency
+        )
+
+        # ── Pixmap → PIL Image → PNG bytes ────────
+        image = Image.frombytes(
+            "RGBA",
+            [pixmap.width, pixmap.height],
+            pixmap.samples,
+        )
+
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="PNG",
+            optimize=True,
+            compress_level=6,  # 0-9, 6 is balanced
+        )
+        buffer.seek(0)
+        png_bytes = buffer.read()
+
+        results.append(
+            {
+                "page": page_num,
+                "bytes": png_bytes,
+                "width": pixmap.width,
+                "height": pixmap.height,
+                "filename": f"page_{page_num}.png",
+                "size_kb": round(len(png_bytes) / 1024, 2),
+            }
+        )
+
+    doc.close()
+    return results
+
+
+def rotate_pdf(
+    source,
+    rotation : int  = 90,
+    pages    : list = None,
+    password : str  = None,
+) -> tuple:
+    """
+    Rotate pages in a PDF.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        rotation : degrees to rotate (90, 180, 270, -90)
+        pages    : list of page numbers to rotate (1-based)
+                   None = rotate all pages
+        password : PDF password if encrypted
+
+    Returns:
+        (rotated_bytes, total_pages, rotated_count)
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, 'read'):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    # ── Validate PDF ──────────────────────────────
+    if not pdf_bytes.startswith(b'%PDF'):
+        raise ValueError('Invalid PDF file.')
+
+    # ── Normalize rotation ─────────────────────────
+    valid_rotations = [90, 180, 270, -90, -180, -270]
+    if rotation not in valid_rotations:
+        raise ValueError(
+            f'Invalid rotation: {rotation}. '
+            f'Must be one of: {valid_rotations}'
+        )
+    rotation = rotation % 360
+
+    # ── Read PDF ──────────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # ── Decrypt if needed ──────────────────────────
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError('PDF is encrypted. Provide a password.')
+        if reader.decrypt(password) == 0:
+            raise ValueError('Wrong password.')
+
+    total_pages = len(reader.pages)
+
+    # ── Validate page numbers ──────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f'Invalid page numbers: {invalid}. '
+                f'PDF has {total_pages} pages (1-{total_pages}).'
+            )
+        pages_to_rotate = set(pages)
+    else:
+        pages_to_rotate = set(range(1, total_pages + 1))
+
+    # ── Rotate + write ─────────────────────────────
+    writer = PdfWriter()
+
+    for i, page in enumerate(reader.pages, start=1):
+        if i in pages_to_rotate:
+            page.rotate(rotation)
+        writer.add_page(page)
+
+    # ── Copy metadata ──────────────────────────────
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+
+    return buffer.read(), total_pages, len(pages_to_rotate)
+
+
+def get_pdf_page_info(source, password: str = None) -> list:
+    """
+    Get rotation and dimension info for each page.
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        password : PDF password if encrypted
+
+    Returns:
+        list of { page, width, height, rotation }
+    """
+    from pypdf import PdfReader
+
+    if hasattr(source, 'read'):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError('PDF is encrypted. Provide a password.')
+        if reader.decrypt(password) == 0:
+            raise ValueError('Wrong password.')
+
+    result = []
+    for i, page in enumerate(reader.pages, start=1):
+        result.append({
+            'page'    : i,
+            'width'   : float(page.mediabox.width),
+            'height'  : float(page.mediabox.height),
+            'rotation': page.rotation,
+        })
+
+    return result
+
+
+def watermark_pdf(
+    source,
+    watermark_text: str = "CONFIDENTIAL",
+    watermark_type: str = "text",
+    watermark_image: bytes = None,
+    opacity: float = 0.3,
+    font_size: int = 60,
+    color: str = "red",
+    angle: int = 45,
+    position: str = "center",
+    pages: list = None,
+    password: str = None,
+) -> bytes:
+    """
+    Add text or image watermark to a PDF.
+    Returns raw bytes of the watermarked PDF.
+    """
+    from pypdf import PdfReader, PdfWriter
+    from reportlab.lib import colors as rl_colors
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    # ── Read PDF bytes ────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+    else:
+        pdf_bytes = source
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    # ── Validate ──────────────────────────────────
+    valid_positions = (
+        "center",
+        "top",
+        "bottom",
+        "top-left",
+        "top-right",
+        "bottom-left",
+        "bottom-right",
+    )
+    if position not in valid_positions:
+        raise ValueError(f"Invalid position. Must be one of: {valid_positions}")
+    if not (0.0 <= opacity <= 1.0):
+        raise ValueError("opacity must be between 0.0 and 1.0.")
+    if watermark_type not in ("text", "image"):
+        raise ValueError('watermark_type must be "text" or "image".')
+    if watermark_type == "image" and not watermark_image:
+        raise ValueError("watermark_image bytes are required for image watermark.")
+
+    # ── Color map ─────────────────────────────────
+    color_map = {
+        "red": rl_colors.red,
+        "blue": rl_colors.blue,
+        "grey": rl_colors.grey,
+        "gray": rl_colors.grey,
+        "black": rl_colors.black,
+        "green": rl_colors.green,
+        "yellow": rl_colors.yellow,
+        "white": rl_colors.white,
+    }
+    wm_color = color_map.get(color.lower(), rl_colors.red)
+
+    # ── Read PDF ──────────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if reader.decrypt(password) == 0:
+            raise ValueError("Wrong password.")
+
+    total_pages = len(reader.pages)
+
+    # ── Pages to watermark ────────────────────────
+    if pages is not None:
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"PDF has {total_pages} pages (1-{total_pages})."
+            )
+        pages_to_watermark = set(pages)
+    else:
+        pages_to_watermark = set(range(1, total_pages + 1))
+
+    # ── Position calculator ────────────────────────
+    def get_position(pos, pw, ph):
+        padding = 60
+        return {
+            "center": (pw / 2, ph / 2),
+            "top": (pw / 2, ph - padding),
+            "bottom": (pw / 2, padding),
+            "top-left": (padding, ph - padding),
+            "top-right": (pw - padding, ph - padding),
+            "bottom-left": (padding, padding),
+            "bottom-right": (pw - padding, padding),
+        }.get(pos, (pw / 2, ph / 2))
+
+    # ── Build text watermark page ──────────────────
+    def make_text_watermark(pw, ph) -> bytes:
+        buf = io.BytesIO()
+        c = rl_canvas.Canvas(buf, pagesize=(pw, ph))
+
+        x, y = get_position(position, pw, ph)
+
+        c.saveState()
+        c.setFillColor(wm_color, alpha=opacity)
+        c.setFont("Helvetica-Bold", font_size)
+        c.translate(x, y)
+        c.rotate(angle)
+        c.drawCentredString(0, 0, watermark_text)
+        c.restoreState()
+
+        c.save()
+        buf.seek(0)
+        return buf.read()
+
+    # ── Build image watermark page ─────────────────
+    def make_image_watermark(pw, ph) -> bytes:
+        from PIL import Image as PILImage
+        from reportlab.lib.utils import ImageReader
+
+        buf = io.BytesIO()
+        c = rl_canvas.Canvas(buf, pagesize=(pw, ph))
+
+        # ── Open + convert image ───────────────────
+        pil_img = PILImage.open(io.BytesIO(watermark_image))
+
+        # Convert palette/RGBA → RGBA for consistent handling
+        if pil_img.mode == "P":
+            pil_img = pil_img.convert("RGBA")
+        if pil_img.mode not in ("RGB", "RGBA", "L"):
+            pil_img = pil_img.convert("RGBA")
+
+        # ── Apply opacity to image ─────────────────
+        if pil_img.mode == "RGBA":
+            r, g, b, a = pil_img.split()
+            # Scale alpha channel by opacity
+            a = a.point(lambda px: int(px * opacity))
+            pil_img = PILImage.merge("RGBA", (r, g, b, a))
+        else:
+            # For RGB images, convert to RGBA and apply opacity
+            pil_img = pil_img.convert("RGBA")
+            r, g, b, a = pil_img.split()
+            a = a.point(lambda px: int(px * opacity))
+            pil_img = PILImage.merge("RGBA", (r, g, b, a))
+
+        # ── Save processed image to buffer ─────────
+        img_buf = io.BytesIO()
+        pil_img.save(img_buf, format="PNG")
+        img_buf.seek(0)
+
+        # ── Scale image to fit page (max 40%) ──────
+        orig_w, orig_h = pil_img.size
+        max_w = pw * 0.4
+        max_h = ph * 0.4
+        scale = min(max_w / orig_w, max_h / orig_h)
+        draw_w = orig_w * scale
+        draw_h = orig_h * scale
+
+        # ── Get anchor position ────────────────────
+        x, y = get_position(position, pw, ph)
+
+        # ── Draw image ─────────────────────────────
+        c.saveState()
+        c.translate(x, y)
+        c.rotate(angle)
+
+        # Draw centered on anchor point
+        c.drawImage(
+            ImageReader(img_buf),
+            x=-draw_w / 2,
+            y=-draw_h / 2,
+            width=draw_w,
+            height=draw_h,
+            mask="auto",
+        )
+        c.restoreState()
+
+        c.save()
+        buf.seek(0)
+        return buf.read()
+
+    # ── Apply watermark to each page ──────────────
+    writer = PdfWriter()
+
+    for i, page in enumerate(reader.pages, start=1):
+        if i in pages_to_watermark:
+            pw = float(page.mediabox.width)
+            ph = float(page.mediabox.height)
+
+            try:
+                if watermark_type == "image":
+                    wm_bytes = make_image_watermark(pw, ph)
+                else:
+                    wm_bytes = make_text_watermark(pw, ph)
+
+                wm_page = PdfReader(io.BytesIO(wm_bytes)).pages[0]
+                page.merge_page(wm_page)
+
+            except Exception as e:
+                # If watermark fails on a page, keep original page
+                raise RuntimeError(f"Watermark failed on page {i}: {e}")
+
+        writer.add_page(page)
+
+    # ── Copy metadata ──────────────────────────────
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+
+    # ── Serialize → always return bytes ───────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer.read()  # ← always bytes, never None
+
+
+def merge_pdfs(
+    sources: list,
+    add_bookmarks: bool = True,
+    add_page_numbers: bool = False,
+    password: str = None,
+) -> dict:
+    """
+    Merge multiple PDF files into one document.
+
+    Args:
+        sources          : list of file objects OR bytes
+        add_bookmarks    : add bookmark per file      (default: True)
+        add_page_numbers : add page numbers           (default: False)
+        password         : output PDF password        (default: None)
+
+    Returns:
+        {
+            'bytes'      : bytes,
+            'total_pages': int,
+            'files_merged': int,
+            'bookmarks'  : list,
+        }
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    if not sources:
+        raise ValueError("No files provided to merge.")
+    if len(sources) < 2:
+        raise ValueError("At least 2 PDF files are required.")
+    if len(sources) > 50:
+        raise ValueError("Maximum 50 files can be merged at once.")
+
+    writer = PdfWriter()
+    total_pages = 0
+    bookmarks = []
+    file_metadata = []
+
+    # ── Process each PDF ──────────────────────────
+    for i, source in enumerate(sources):
+        try:
+            if hasattr(source, "read"):
+                pdf_bytes = source.read()
+                filename = getattr(source, "name", f"file_{i+1}.pdf")
+            elif isinstance(source, bytes):
+                pdf_bytes = source
+                filename = f"file_{i+1}.pdf"
+            else:
+                raise ValueError(f"Invalid source at index {i}.")
+
+            if not pdf_bytes.startswith(b"%PDF"):
+                raise ValueError(f'"{filename}" is not a valid PDF.')
+
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+
+            # ── Decrypt if needed ──────────────────
+            if reader.is_encrypted:
+                raise ValueError(
+                    f'"{filename}" is encrypted. ' f"Please decrypt it first."
+                )
+
+            page_count = len(reader.pages)
+
+            # ── Add bookmark for this file ─────────
+            if add_bookmarks:
+                bookmarks.append(
+                    {
+                        "title": filename.replace(".pdf", "").replace(".PDF", ""),
+                        "page": total_pages + 1,
+                        "page_count": page_count,
+                        "filename": filename,
+                    }
+                )
+
+                writer.add_outline_item(
+                    title=filename.replace(".pdf", "").replace(".PDF", ""),
+                    page_number=total_pages,
+                )
+
+            # ── Copy all pages ─────────────────────
+            for page in reader.pages:
+                writer.add_page(page)
+
+            file_metadata.append(
+                {
+                    "index": i + 1,
+                    "filename": filename,
+                    "pages": page_count,
+                    "start_page": total_pages + 1,
+                    "end_page": total_pages + page_count,
+                }
+            )
+
+            total_pages += page_count
+
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Error processing file {i+1}: {e}")
+
+    # ── Add page numbers if requested ──────────────
+    if add_page_numbers:
+        _add_page_numbers_to_writer(writer, total_pages)
+
+    # ── Add merged metadata ────────────────────────
+    writer.add_metadata(
+        {
+            "/Title": f"Merged PDF ({len(sources)} files)",
+            "/Author": "Merge PDF Service",
+            "/Subject": ", ".join(m["filename"] for m in file_metadata),
+            "/Creator": "PDF Merge Tool",
+        }
+    )
+
+    # ── Encrypt if password provided ───────────────
+    if password:
+        writer.encrypt(
+            user_password=password,
+            owner_password=password,
+            use_128bit=True,
+        )
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    merged_bytes = buffer.read()
+
+    return {
+        "bytes": merged_bytes,
+        "total_pages": total_pages,
+        "files_merged": len(sources),
+        "size_kb": round(len(merged_bytes) / 1024, 2),
+        "size_mb": round(len(merged_bytes) / (1024 * 1024), 2),
+        "bookmarks": bookmarks,
+        "files": file_metadata,
+    }
+
+
+def _add_page_numbers_to_writer(writer, total_pages: int):
+    """
+    Add page number overlay to each page.
+    Uses reportlab to create a transparent overlay.
+    """
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.lib.pagesizes import A4
+
+    for page_num in range(total_pages):
+        page = writer.pages[page_num]
+
+        # Get page dimensions
+        try:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+        except Exception:
+            width, height = A4
+
+        # Create overlay with page number
+        overlay_buffer = io.BytesIO()
+        c = rl_canvas.Canvas(overlay_buffer, pagesize=(width, height))
+        c.setFont("Helvetica", 9)
+        c.setFillColorRGB(0.5, 0.5, 0.5, alpha=0.8)
+        c.drawCentredString(
+            width / 2,
+            20,
+            f"Page {page_num + 1} of {total_pages}",
+        )
+        c.save()
+        overlay_buffer.seek(0)
+
+        # Merge overlay onto page
+        overlay_reader = PdfReader(overlay_buffer)
+        overlay_page = overlay_reader.pages[0]
+        page.merge_page(overlay_page)
+
+
+def split_pdf(
+    source,
+    split_by: str = "page",
+    pages: list = None,
+    chunk_size: int = 1,
+    ranges: list = None,
+    password: str = None,
+) -> list[dict]:
+    """
+    Split a PDF file into multiple documents.
+
+    Args:
+        source     : uploaded file object OR raw bytes
+        split_by   : 'page'   → one PDF per page
+                     'chunk'  → split every N pages
+                     'range'  → extract specific page ranges
+                     'pages'  → extract specific individual pages
+        pages      : list of page numbers for 'pages' mode
+                     e.g. [1, 3, 5] → extract pages 1, 3, 5
+        chunk_size : pages per chunk for 'chunk' mode  (default: 1)
+        ranges     : list of [start, end] for 'range' mode
+                     e.g. [[1,3], [4,6], [7,10]]
+        password   : PDF password if encrypted
+
+    Returns:
+        list of {
+            'index'      : int,
+            'filename'   : str,
+            'bytes'      : bytes,
+            'pages'      : int,
+            'start_page' : int,
+            'end_page'   : int,
+            'size_kb'    : float,
+        }
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+        filename = getattr(source, "name", "document.pdf")
+    elif isinstance(source, bytes):
+        pdf_bytes = source
+        filename = "document.pdf"
+    else:
+        raise ValueError("Invalid source.")
+
+    if not pdf_bytes:
+        raise ValueError("Empty file.")
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    base_name = filename.replace(".pdf", "").replace(".PDF", "")
+
+    # ── Validate split_by ─────────────────────────
+    valid_modes = ("page", "chunk", "range", "pages")
+    if split_by not in valid_modes:
+        raise ValueError(f"split_by must be one of: {valid_modes}")
+
+    # ── Open PDF ──────────────────────────────────
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if reader.decrypt(password) == 0:
+            raise ValueError("Wrong password.")
+
+    total_pages = len(reader.pages)
+
+    if total_pages == 0:
+        raise ValueError("PDF has no pages.")
+
+    # ── Helper: write pages to bytes ───────────────
+    def pages_to_bytes(
+        page_numbers: list,
+        start_page: int,
+        end_page: int,
+        part_index: int,
+        label: str = "",
+    ) -> dict:
+        writer = PdfWriter()
+
+        for pn in page_numbers:
+            writer.add_page(reader.pages[pn - 1])
+
+        # Copy metadata
+        if reader.metadata:
+            writer.add_metadata(dict(reader.metadata))
+
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        buffer.seek(0)
+        raw = buffer.read()
+
+        fname = f"{base_name}_part{part_index}"
+        if label:
+            fname += f"_{label}"
+        fname += ".pdf"
+
+        return {
+            "index": part_index,
+            "filename": fname,
+            "bytes": raw,
+            "pages": len(page_numbers),
+            "start_page": start_page,
+            "end_page": end_page,
+            "size_kb": round(len(raw) / 1024, 2),
+        }
+
+    results = []
+
+    # ────────────────────────────────────────────────
+    # MODE 1: One PDF per page
+    # ────────────────────────────────────────────────
+    if split_by == "page":
+        for page_num in range(1, total_pages + 1):
+            result = pages_to_bytes(
+                page_numbers=[page_num],
+                start_page=page_num,
+                end_page=page_num,
+                part_index=page_num,
+                label=f"page{page_num}",
+            )
+            results.append(result)
+
+    # ────────────────────────────────────────────────
+    # MODE 2: Split every N pages (chunk)
+    # ────────────────────────────────────────────────
+    elif split_by == "chunk":
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be at least 1.")
+
+        if chunk_size >= total_pages:
+            raise ValueError(
+                f"chunk_size ({chunk_size}) must be less than "
+                f"total pages ({total_pages})."
+            )
+
+        part_index = 1
+        for start in range(1, total_pages + 1, chunk_size):
+            end = min(start + chunk_size - 1, total_pages)
+            page_numbers = list(range(start, end + 1))
+
+            result = pages_to_bytes(
+                page_numbers=page_numbers,
+                start_page=start,
+                end_page=end,
+                part_index=part_index,
+                label=f"pages{start}-{end}",
+            )
+            results.append(result)
+            part_index += 1
+
+    # ────────────────────────────────────────────────
+    # MODE 3: Extract specific page ranges
+    # ────────────────────────────────────────────────
+    elif split_by == "range":
+        if not ranges:
+            raise ValueError(
+                '"ranges" is required for range mode. ' "e.g. [[1,3], [4,6]]"
+            )
+
+        for part_index, r in enumerate(ranges, start=1):
+            if isinstance(r, (int, float)):
+                start = end = int(r)
+            elif isinstance(r, (list, tuple)) and len(r) == 2:
+                start, end = int(r[0]), int(r[1])
+            else:
+                raise ValueError(
+                    f"Invalid range: {r}. " f"Use integers or [start, end] pairs."
+                )
+
+            if start < 1 or end > total_pages:
+                raise ValueError(
+                    f"Range [{start}, {end}] is out of bounds. "
+                    f"PDF has {total_pages} pages (1-{total_pages})."
+                )
+            if start > end:
+                raise ValueError(
+                    f"Invalid range [{start}, {end}]: " f"start must be <= end."
+                )
+
+            page_numbers = list(range(start, end + 1))
+
+            result = pages_to_bytes(
+                page_numbers=page_numbers,
+                start_page=start,
+                end_page=end,
+                part_index=part_index,
+                label=f"pages{start}-{end}",
+            )
+            results.append(result)
+
+    # ────────────────────────────────────────────────
+    # MODE 4: Extract specific individual pages
+    # ────────────────────────────────────────────────
+    elif split_by == "pages":
+        if not pages:
+            raise ValueError('"pages" is required for pages mode. ' "e.g. [1, 3, 5]")
+
+        # ── Validate page numbers ─────────────────
+        invalid = [p for p in pages if not (1 <= p <= total_pages)]
+        if invalid:
+            raise ValueError(
+                f"Invalid page numbers: {invalid}. "
+                f"PDF has {total_pages} pages (1-{total_pages})."
+            )
+
+        # ── Option A: each page as separate PDF ────
+        for part_index, page_num in enumerate(sorted(pages), start=1):
+            result = pages_to_bytes(
+                page_numbers=[page_num],
+                start_page=page_num,
+                end_page=page_num,
+                part_index=part_index,
+                label=f"page{page_num}",
+            )
+            results.append(result)
+
+    if not results:
+        raise ValueError("No content found to split.")
+
+    return results

@@ -42,6 +42,7 @@ from .services.json_service import (
     json_to_excel_multisheets,
     format_json,
     json_to_yaml,
+    yaml_to_json
 )
 from .services.excel_service import (
     excel_to_csv,
@@ -5224,7 +5225,6 @@ class ExcelToMarkdownView(APIView):
         )
 
 
-
 class JSONFileToYAMLView(APIView):
     """
     POST /api/convert/json-file-to-yaml/
@@ -5426,6 +5426,218 @@ class JSONTextToYAMLView(APIView):
                 "depth": result["depth"],
                 "size_original_kb": result["size_original_kb"],
                 "size_yaml_kb": result["size_yaml_kb"],
+                "sort_keys": result["sort_keys"],
+                "indent": result["indent"],
+            }
+        )
+
+
+
+class YAMLFileToJSONView(APIView):
+    """
+    POST /api/convert/yaml-file-to-json/
+    Upload a .yaml/.yml file → returns JSON.
+
+    Form fields:
+        file         : YAML file                           (required)
+        indent       : JSON indentation spaces 1-8         (default: 4)
+        sort_keys    : true | false                        (default: false)
+        ensure_ascii : true | false                        (default: false)
+        encoding     : utf-8 | ascii | latin-1             (default: utf-8)
+        output       : text | file                         (default: text)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        indent = request.data.get("indent", "4")
+        sort_keys = request.data.get("sort_keys", "false")
+        ensure_ascii = request.data.get("ensure_ascii", "false")
+        encoding = request.data.get("encoding", "utf-8")
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith((".yaml", ".yml")):
+            return Response(
+                {"error": "Only .yaml or .yml files are accepted."},
+                status=400,
+            )
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be: text or file."},
+                status=400,
+            )
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse indent ──────────────────────────
+        try:
+            indent = int(indent)
+            if not (1 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 1 and 8."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        sort_keys = to_bool(sort_keys)
+        ensure_ascii = to_bool(ensure_ascii)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = yaml_to_json(
+                file,
+                indent=indent,
+                sort_keys=sort_keys,
+                ensure_ascii=ensure_ascii,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            json_filename = (
+                file.name.replace(".yaml", ".json")
+                .replace(".yml", ".json")
+                .replace(".YAML", ".json")
+                .replace(".YML", ".json")
+            )
+            response = HttpResponse(
+                result["json"],
+                content_type="application/json",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{json_filename}"'
+            response["Content-Length"] = result["size_json"]
+            return response
+
+        return Response(
+            {
+                "json": result["json"],
+                "type": result["type"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "depth": result["depth"],
+                "documents": result["documents"],
+                "size_original_kb": result["size_original_kb"],
+                "size_json_kb": result["size_json_kb"],
+                "sort_keys": result["sort_keys"],
+                "indent": result["indent"],
+            }
+        )
+
+
+class YAMLTextToJSONView(APIView):
+    """
+    POST /api/convert/yaml-text-to-json/
+    Send raw YAML text → returns JSON.
+
+    JSON body:
+        {
+            "yaml"        : "name: Alice\\nage: 30",
+            "indent"      : 4,
+            "sort_keys"   : false,
+            "ensure_ascii": false,
+            "output"      : "text"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        yaml_input = request.data.get("yaml")
+        indent = request.data.get("indent", 4)
+        sort_keys = request.data.get("sort_keys", False)
+        ensure_ascii = request.data.get("ensure_ascii", False)
+        encoding = request.data.get("encoding", "utf-8")
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if not yaml_input:
+            return Response(
+                {"error": '"yaml" field is required.'},
+                status=400,
+            )
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be: text or file."},
+                status=400,
+            )
+
+        # ── Parse indent ──────────────────────────
+        try:
+            indent = int(indent)
+            if not (1 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 1 and 8."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        sort_keys = to_bool(sort_keys)
+        ensure_ascii = to_bool(ensure_ascii)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = yaml_to_json(
+                str(yaml_input),
+                indent=indent,
+                sort_keys=sort_keys,
+                ensure_ascii=ensure_ascii,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["json"],
+                content_type="application/json",
+            )
+            response["Content-Disposition"] = 'attachment; filename="output.json"'
+            response["Content-Length"] = result["size_json"]
+            return response
+
+        return Response(
+            {
+                "json": result["json"],
+                "type": result["type"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "depth": result["depth"],
+                "documents": result["documents"],
+                "size_original_kb": result["size_original_kb"],
+                "size_json_kb": result["size_json_kb"],
                 "sort_keys": result["sort_keys"],
                 "indent": result["indent"],
             }

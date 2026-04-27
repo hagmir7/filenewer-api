@@ -8,6 +8,8 @@ from ..views import (
     JSONTextFormatterView,
     JSONFileToYAMLView,
     JSONTextToYAMLView,
+    YAMLFileToJSONView,
+    YAMLTextToJSONView,
 )
 
 urlpatterns = [
@@ -19,4 +21,6 @@ urlpatterns = [
     path("tools/format-json-text", JSONTextFormatterView.as_view(), name="json-text-formatter"),
     path('tools/json-file-to-yaml', JSONFileToYAMLView.as_view(), name='json-file-to-yaml'),
     path('tools/json-text-to-yaml', JSONTextToYAMLView.as_view(), name='json-text-to-yaml'),
+    path('tools/yaml-file-to-json', YAMLFileToJSONView.as_view(), name='yaml-file-to-json'),
+    path('tools/yaml-text-to-json', YAMLTextToJSONView.as_view(), name='yaml-text-to-json'),
 ]

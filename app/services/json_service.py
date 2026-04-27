@@ -397,3 +397,132 @@ def json_to_yaml(
         "indent": indent,
         "encoding": encoding,
     }
+
+
+def yaml_to_json(
+    source,
+    indent: int = 4,
+    sort_keys: bool = False,
+    ensure_ascii: bool = False,
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Convert YAML (file or text) → JSON string.
+
+    Args:
+        source       : file object | raw YAML string | bytes
+        indent       : JSON indentation spaces       (default: 4)
+        sort_keys    : sort keys alphabetically      (default: False)
+        ensure_ascii : escape non-ASCII characters   (default: False)
+        encoding     : input encoding               (default: utf-8)
+
+    Returns:
+        {
+            'json'          : str,
+            'parsed'        : dict | list,
+            'input_type'    : str,
+            'type'          : str,
+            'key_count'     : int,
+            'depth'         : int,
+            'size_original' : int,
+            'size_json'     : int,
+            'documents'     : int,
+        }
+    """
+    import yaml
+
+    # ── Read source ───────────────────────────────
+    input_type = "text"
+
+    if hasattr(source, "read"):
+        raw = source.read()
+        input_type = "file"
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+        input_type = "bytes"
+    elif isinstance(source, str):
+        raw = source.strip()
+        input_type = "text"
+    else:
+        raise ValueError("source must be a string, bytes, or file object.")
+
+    if not raw.strip():
+        raise ValueError("Empty input.")
+
+    # ── Parse YAML ────────────────────────────────
+    try:
+        # Load all documents (handles multi-document YAML)
+        documents = list(yaml.safe_load_all(raw))
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML: {e}")
+
+    if not documents:
+        raise ValueError("No YAML documents found.")
+
+    # ── Single vs multi-document ──────────────────
+    if len(documents) == 1:
+        data = documents[0]
+    else:
+        # Multiple YAML docs → JSON array
+        data = documents
+
+    if data is None:
+        raise ValueError("YAML parsed to null — nothing to convert.")
+
+    # ── Convert to JSON ───────────────────────────
+    json_str = json.dumps(
+        data,
+        indent=indent,
+        sort_keys=sort_keys,
+        ensure_ascii=ensure_ascii,
+        default=str,  # fallback for non-serializable types
+    )
+
+    # ── Analyze ───────────────────────────────────
+    def get_depth(obj, level=0):
+        if isinstance(obj, dict):
+            if not obj:
+                return level
+            return max(get_depth(v, level + 1) for v in obj.values())
+        if isinstance(obj, list):
+            if not obj:
+                return level
+            return max(get_depth(i, level + 1) for i in obj)
+        return level
+
+    def count_keys(obj):
+        if isinstance(obj, dict):
+            return len(obj) + sum(count_keys(v) for v in obj.values())
+        if isinstance(obj, list):
+            return sum(count_keys(i) for i in obj)
+        return 0
+
+    json_type = (
+        "object"
+        if isinstance(data, dict)
+        else "array" if isinstance(data, list) else "other"
+    )
+
+    return {
+        "json": json_str,
+        "parsed": data,
+        "input_type": input_type,
+        "type": json_type,
+        "key_count": count_keys(data),
+        "item_count": len(data) if isinstance(data, (dict, list)) else 1,
+        "depth": get_depth(data),
+        "documents": len(documents),
+        "size_original": len(raw),
+        "size_json": len(json_str),
+        "size_original_kb": round(len(raw) / 1024, 2),
+        "size_json_kb": round(len(json_str) / 1024, 2),
+        "sort_keys": sort_keys,
+        "indent": indent,
+        "encoding": encoding,
+    }
+
+
+
+

@@ -28,8 +28,10 @@ from .services.pdf_service import (
     merge_pdfs,
     split_pdf,
     latex_to_pdf,
-    pdf_to_mobi
-
+    pdf_to_mobi,
+    html_to_epub,
+    pdf_to_epub,
+    ipynb_to_pdf
 )
 from .services.csv_service import (
     sanitize_name,
@@ -45,7 +47,8 @@ from .services.json_service import (
     json_to_excel_multisheets,
     format_json,
     json_to_yaml,
-    yaml_to_json
+    yaml_to_json,
+    json_to_xml
 )
 from .services.excel_service import (
     excel_to_csv,
@@ -6113,4 +6116,549 @@ class PDFToMOBIView(APIView):
         if "note" in result:
             response["X-Note"] = result["note"]
 
+        return response
+
+
+class HTMLToEPUBView(APIView):
+    """
+    POST /api/convert/html-to-epub/
+    Upload HTML file or send raw HTML → returns EPUB.
+
+    Form fields (file upload):
+        file        : HTML file (.html / .htm)             (required)
+        title       : book title                           (optional)
+        author      : book author                          (optional)
+        language    : language code e.g. en, ar, fr        (default: en)
+        description : book description                     (optional)
+        publisher   : book publisher                       (optional)
+        cover_image : cover image file PNG/JPG             (optional)
+        encoding    : utf-8 | ascii | latin-1              (default: utf-8)
+
+    JSON body (raw HTML):
+        {
+            "html"       : "<html>...</html>",
+            "title"      : "My Book",
+            "author"     : "John Smith",
+            "language"   : "en",
+            "description": "Book description",
+            "publisher"  : "Publisher Name"
+        }
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file", None)
+        html_text = request.data.get("html", None)
+        cover_file = request.FILES.get("cover_image", None)
+        title = request.data.get("title", "")
+        author = request.data.get("author", "")
+        language = request.data.get("language", "en")
+        description = request.data.get("description", "")
+        publisher = request.data.get("publisher", "")
+        encoding = request.data.get("encoding", "utf-8")
+
+        # ── Validate ──────────────────────────────
+        if not file and not html_text:
+            return Response(
+                {"error": 'Provide either "file" (.html) or "html" (raw string).'},
+                status=400,
+            )
+
+        if file and not file.name.lower().endswith((".html", ".htm")):
+            return Response(
+                {"error": "Only .html or .htm files are accepted."},
+                status=400,
+            )
+
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Read cover image ──────────────────────
+        cover_bytes = None
+        if cover_file:
+            try:
+                cover_bytes = cover_file.read()
+            except Exception:
+                pass
+
+        # ── Source + filename ──────────────────────
+        source = file if file else str(html_text)
+        src_name = file.name if file else "document.html"
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = html_to_epub(
+                source,
+                filename=src_name,
+                title=str(title),
+                author=str(author),
+                language=str(language),
+                description=str(description),
+                publisher=str(publisher),
+                cover_image=cover_bytes,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output filename ───────────────────────
+        epub_filename = (
+            src_name.replace(".html", ".epub")
+            .replace(".htm", ".epub")
+            .replace(".HTML", ".epub")
+            .replace(".HTM", ".epub")
+        )
+        if not epub_filename.endswith(".epub"):
+            epub_filename = "output.epub"
+
+        # ── Return EPUB download ───────────────────
+        response = HttpResponse(
+            result["bytes"],
+            content_type="application/epub+zip",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{epub_filename}"'
+        response["Content-Length"] = len(result["bytes"])
+        response["X-Title"] = result["title"]
+        response["X-Author"] = result["author"]
+        response["X-Chapters"] = result["chapters"]
+        response["X-Images"] = result["images"]
+        response["X-Size-KB"] = result["size_kb"]
+        return response
+
+
+class JSONFileToXMLView(APIView):
+    """
+    POST /api/convert/json-file-to-xml/
+    Upload a .json file → returns XML.
+
+    Form fields:
+        file                : JSON file                    (required)
+        root_element        : root XML tag                 (default: root)
+        item_element        : array item tag               (default: item)
+        indent              : XML indentation 1-8          (default: 2)
+        encoding            : utf-8 | ascii | latin-1      (default: utf-8)
+        include_declaration : true | false                 (default: true)
+        prettify            : true | false                 (default: true)
+        attributes_mode     : true | false                 (default: false)
+        output              : text | file                  (default: text)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        root_element = request.data.get("root_element", "root")
+        item_element = request.data.get("item_element", "item")
+        indent = request.data.get("indent", "2")
+        encoding = request.data.get("encoding", "utf-8")
+        include_declaration = request.data.get("include_declaration", "true")
+        prettify = request.data.get("prettify", "true")
+        attributes_mode = request.data.get("attributes_mode", "false")
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith(".json"):
+            return Response(
+                {"error": "Only .json files are accepted."},
+                status=400,
+            )
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be: text or file."},
+                status=400,
+            )
+
+        # ── Parse ─────────────────────────────────
+        try:
+            indent = int(indent)
+            if not (1 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 1 and 8."},
+                status=400,
+            )
+
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_declaration = to_bool(include_declaration)
+        prettify = to_bool(prettify)
+        attributes_mode = to_bool(attributes_mode)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = json_to_xml(
+                file,
+                root_element=root_element,
+                item_element=item_element,
+                indent=indent,
+                encoding=encoding,
+                include_declaration=include_declaration,
+                prettify=prettify,
+                attributes_mode=attributes_mode,
+            )
+        except json.JSONDecodeError as e:
+            return Response(
+                {"error": f"Invalid JSON: {e}"},
+                status=400,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            xml_filename = file.name.replace(".json", ".xml")
+            response = HttpResponse(
+                result["xml"],
+                content_type="application/xml",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{xml_filename}"'
+            response["Content-Length"] = result["size_xml"]
+            return response
+
+        return Response(
+            {
+                "xml": result["xml"],
+                "type": result["type"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "depth": result["depth"],
+                "size_original_kb": result["size_original_kb"],
+                "size_xml_kb": result["size_xml_kb"],
+                "root_element": result["root_element"],
+                "item_element": result["item_element"],
+            }
+        )
+
+
+class JSONTextToXMLView(APIView):
+    """
+    POST /api/convert/json-text-to-xml/
+    Send raw JSON → returns XML.
+
+    JSON body:
+        {
+            "json"               : {"key": "value"} or "[...]",
+            "root_element"       : "root",
+            "item_element"       : "item",
+            "indent"             : 2,
+            "include_declaration": true,
+            "prettify"           : true,
+            "attributes_mode"    : false,
+            "output"             : "text"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        json_input = request.data.get("json")
+        root_element = request.data.get("root_element", "root")
+        item_element = request.data.get("item_element", "item")
+        indent = request.data.get("indent", 2)
+        encoding = request.data.get("encoding", "utf-8")
+        include_declaration = request.data.get("include_declaration", True)
+        prettify = request.data.get("prettify", True)
+        attributes_mode = request.data.get("attributes_mode", False)
+        output = request.data.get("output", "text")
+
+        # ── Validate ──────────────────────────────
+        if json_input is None:
+            return Response(
+                {"error": '"json" field is required.'},
+                status=400,
+            )
+        if output not in ("text", "file"):
+            return Response(
+                {"error": "output must be: text or file."},
+                status=400,
+            )
+
+        # ── Parse indent ──────────────────────────
+        try:
+            indent = int(indent)
+            if not (1 <= indent <= 8):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "indent must be an integer between 1 and 8."},
+                status=400,
+            )
+
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_declaration = to_bool(include_declaration)
+        prettify = to_bool(prettify)
+        attributes_mode = to_bool(attributes_mode)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = json_to_xml(
+                json_input,
+                root_element=root_element,
+                item_element=item_element,
+                indent=indent,
+                encoding=encoding,
+                include_declaration=include_declaration,
+                prettify=prettify,
+                attributes_mode=attributes_mode,
+            )
+        except json.JSONDecodeError as e:
+            return Response(
+                {"error": f"Invalid JSON: {e}"},
+                status=400,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return file download ───────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["xml"],
+                content_type="application/xml",
+            )
+            response["Content-Disposition"] = 'attachment; filename="output.xml"'
+            response["Content-Length"] = result["size_xml"]
+            return response
+
+        return Response(
+            {
+                "xml": result["xml"],
+                "type": result["type"],
+                "key_count": result["key_count"],
+                "item_count": result["item_count"],
+                "depth": result["depth"],
+                "size_original_kb": result["size_original_kb"],
+                "size_xml_kb": result["size_xml_kb"],
+                "root_element": result["root_element"],
+                "item_element": result["item_element"],
+            }
+        )
+
+
+class PDFToEPUBView(APIView):
+    """
+    POST /api/convert/pdf-to-epub/
+    Upload PDF → returns EPUB.
+
+    Form fields:
+        file          : PDF file                           (required)
+        title         : book title                         (optional)
+        author        : book author                        (optional)
+        language      : language code e.g. en, ar, fr     (default: en)
+        description   : book description                   (optional)
+        publisher     : publisher name                     (optional)
+        password      : PDF password if encrypted          (optional)
+        image_dpi     : render DPI 72-300                  (default: 150)
+        image_quality : JPEG quality 1-95                  (default: 75)
+        extract_text  : true | false                       (default: true)
+    """
+    parser_classes     = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file          = request.FILES.get('file')
+        title         = request.data.get('title',         '')
+        author        = request.data.get('author',        '')
+        language      = request.data.get('language',      'en')
+        description   = request.data.get('description',   '')
+        publisher     = request.data.get('publisher',     '')
+        password      = request.data.get('password',      None)
+        image_dpi     = request.data.get('image_dpi',     '150')
+        image_quality = request.data.get('image_quality', '75')
+        extract_text  = request.data.get('extract_text',  'true')
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {'error': 'No file provided.'},
+                status=400,
+            )
+        if not file.name.lower().endswith('.pdf'):
+            return Response(
+                {'error': 'Only .pdf files are accepted.'},
+                status=400,
+            )
+
+        # ── Parse integers ─────────────────────────
+        try:
+            image_dpi = int(image_dpi)
+            if not (72 <= image_dpi <= 300):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'image_dpi must be between 72 and 300.'},
+                status=400,
+            )
+
+        try:
+            image_quality = int(image_quality)
+            if not (1 <= image_quality <= 95):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'image_quality must be between 1 and 95.'},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool): return val
+            return str(val).lower() == 'true'
+
+        extract_text = to_bool(extract_text)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = pdf_to_epub(
+                file,
+                filename     =file.name,
+                title        =str(title),
+                author       =str(author),
+                language     =str(language),
+                description  =str(description),
+                publisher    =str(publisher),
+                password     =password,
+                image_dpi    =image_dpi,
+                image_quality=image_quality,
+                extract_text =extract_text,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        # ── Output filename ───────────────────────
+        epub_filename = (
+            file.name
+            .replace('.pdf', '.epub')
+            .replace('.PDF', '.epub')
+        )
+
+        # ── Return EPUB download ───────────────────
+        response = HttpResponse(
+            result['bytes'],
+            content_type='application/epub+zip',
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="{epub_filename}"'
+        )
+        response['Content-Length'] = len(result['bytes'])
+        response['X-Title']        = result['title']
+        response['X-Author']       = result['author']
+        response['X-Pages']        = result['pages']
+        response['X-Chapters']     = result['chapters']
+        response['X-Size-KB']      = result['size_kb']
+        response['X-Size-MB']      = result['size_mb']
+        return response
+
+
+class IPYNBToPDFView(APIView):
+    """
+    POST /api/convert/ipynb-to-pdf/
+    Upload .ipynb → returns PDF.
+
+    Form fields:
+        file             : .ipynb file                      (required)
+        title            : document title                   (optional)
+        author           : author name                      (optional)
+        include_input    : true | false  show code input    (default: true)
+        include_output   : true | false  show cell output   (default: true)
+        include_markdown : true | false  show markdown      (default: true)
+        theme            : light | dark                     (default: light)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        title = request.data.get("title", "")
+        author = request.data.get("author", "")
+        include_input = request.data.get("include_input", "true")
+        include_output = request.data.get("include_output", "true")
+        include_markdown = request.data.get("include_markdown", "true")
+        theme = request.data.get("theme", "light")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith(".ipynb"):
+            return Response(
+                {"error": "Only .ipynb files are accepted."},
+                status=400,
+            )
+        if theme not in ("light", "dark"):
+            return Response(
+                {"error": 'theme must be "light" or "dark".'},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_input = to_bool(include_input)
+        include_output = to_bool(include_output)
+        include_markdown = to_bool(include_markdown)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = ipynb_to_pdf(
+                file,
+                filename=file.name,
+                title=str(title),
+                author=str(author),
+                include_input=include_input,
+                include_output=include_output,
+                include_markdown=include_markdown,
+                theme=theme,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output filename ───────────────────────
+        pdf_filename = file.name.replace(".ipynb", ".pdf").replace(".IPYNB", ".pdf")
+
+        # ── Return PDF download ───────────────────
+        response = HttpResponse(
+            result["bytes"],
+            content_type="application/pdf",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{pdf_filename}"'
+        response["Content-Length"] = len(result["bytes"])
+        response["X-Title"] = result["title"]
+        response["X-Author"] = result["author"]
+        response["X-Total-Cells"] = result["total_cells"]
+        response["X-Code-Cells"] = result["code_cells"]
+        response["X-Markdown-Cells"] = result["markdown_cells"]
+        response["X-Size-KB"] = result["size_kb"]
+        response["X-Size-MB"] = result["size_mb"]
         return response

@@ -10,6 +10,8 @@ from ..views import (
     JSONTextToYAMLView,
     YAMLFileToJSONView,
     YAMLTextToJSONView,
+    JSONFileToXMLView,
+    JSONTextToXMLView,
 )
 
 urlpatterns = [
@@ -23,4 +25,6 @@ urlpatterns = [
     path('tools/json-text-to-yaml', JSONTextToYAMLView.as_view(), name='json-text-to-yaml'),
     path('tools/yaml-file-to-json', YAMLFileToJSONView.as_view(), name='yaml-file-to-json'),
     path('tools/yaml-text-to-json', YAMLTextToJSONView.as_view(), name='yaml-text-to-json'),
+    path('tools/json-file-to-xml', JSONFileToXMLView.as_view(), name='json-file-to-xml'),
+    path('tools/json-text-to-xml', JSONTextToXMLView.as_view(), name='json-text-to-xml'),
 ]

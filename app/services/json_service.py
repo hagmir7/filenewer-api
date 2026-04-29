@@ -524,5 +524,230 @@ def yaml_to_json(
     }
 
 
+def json_to_xml(
+    source,
+    root_element: str = "root",
+    item_element: str = "item",
+    indent: int = 2,
+    encoding: str = "utf-8",
+    include_declaration: bool = True,
+    prettify: bool = True,
+    attributes_mode: bool = False,
+) -> dict:
+    """
+    Convert JSON (file, text, dict, list) → XML string.
+
+    Args:
+        source              : file object | raw JSON string | dict | list
+        root_element        : root XML tag name           (default: root)
+        item_element        : tag for array items         (default: item)
+        indent              : XML indentation spaces      (default: 2)
+        encoding            : output encoding            (default: utf-8)
+        include_declaration : include <?xml ...?>         (default: True)
+        prettify            : pretty print XML            (default: True)
+        attributes_mode     : use attributes instead of
+                              child elements for scalars  (default: False)
+
+    Returns:
+        {
+            'xml'           : str,
+            'type'          : str,
+            'key_count'     : int,
+            'depth'         : int,
+            'size_original' : int,
+            'size_xml'      : int,
+        }
+    """
+    import xml.etree.ElementTree as ET
+    from xml.dom import minidom
+    import re
+
+    # ── Read source ───────────────────────────────
+    input_size = 0
+
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+        data = json.loads(raw)
+        input_size = len(raw)
+
+    elif isinstance(source, (dict, list)):
+        data = source
+        input_size = len(json.dumps(source))
+
+    elif isinstance(source, str):
+        raw = source.strip()
+        data = json.loads(raw)
+        input_size = len(raw)
+
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+        data = json.loads(raw)
+        input_size = len(raw)
+
+    else:
+        raise ValueError("source must be a string, bytes, file, dict, or list.")
+
+    # ── Validate tag names ─────────────────────────
+    def sanitize_tag(name: str) -> str:
+        """Make a valid XML tag name."""
+        name = re.sub(r"[^\w.-]", "_", str(name))
+        if name and name[0].isdigit():
+            name = "_" + name
+        if not name:
+            name = "_"
+        return name
+
+    root_element = sanitize_tag(root_element) or "root"
+    item_element = sanitize_tag(item_element) or "item"
+
+    # ── Build XML tree ────────────────────────────
+    def build_element(parent, data, tag: str):
+        """Recursively build XML elements from JSON data."""
+        tag = sanitize_tag(tag)
+
+        if data is None:
+            el = ET.SubElement(parent, tag)
+            el.set("nil", "true")
+
+        elif isinstance(data, bool):
+            el = ET.SubElement(parent, tag)
+            el.text = "true" if data else "false"
+            el.set("type", "boolean")
+
+        elif isinstance(data, int):
+            el = ET.SubElement(parent, tag)
+            el.text = str(data)
+            el.set("type", "integer")
+
+        elif isinstance(data, float):
+            el = ET.SubElement(parent, tag)
+            el.text = str(data)
+            el.set("type", "float")
+
+        elif isinstance(data, str):
+            el = ET.SubElement(parent, tag)
+            el.text = data
+
+        elif isinstance(data, dict):
+            el = ET.SubElement(parent, tag)
+            if attributes_mode:
+                # Scalar values as attributes
+                children = {}
+                for k, v in data.items():
+                    if isinstance(v, (str, int, float, bool)) and v is not None:
+                        el.set(sanitize_tag(k), str(v))
+                    else:
+                        children[k] = v
+                for k, v in children.items():
+                    build_element(el, v, k)
+            else:
+                for k, v in data.items():
+                    build_element(el, v, k)
+
+        elif isinstance(data, list):
+            el = ET.SubElement(parent, tag)
+            el.set("type", "array")
+            el.set("count", str(len(data)))
+            for idx, item in enumerate(data):
+                # Use key name + index or item_element
+                child_tag = f"{item_element}"
+                build_element(el, item, child_tag)
+
+        else:
+            el = ET.SubElement(parent, tag)
+            el.text = str(data)
+
+        return el
+
+    # ── Create root element ────────────────────────
+    if isinstance(data, dict):
+        root = ET.Element(root_element)
+        for key, value in data.items():
+            build_element(root, value, key)
+    elif isinstance(data, list):
+        root = ET.Element(root_element)
+        root.set("type", "array")
+        root.set("count", str(len(data)))
+        for item in data:
+            build_element(root, item, item_element)
+    else:
+        root = ET.Element(root_element)
+        root.text = str(data)
+
+    # ── Serialize to string ────────────────────────
+    if prettify:
+        xml_str = _prettify_xml(root, indent=indent)
+    else:
+        xml_str = ET.tostring(root, encoding="unicode")
+
+    # ── Add XML declaration ────────────────────────
+    if include_declaration:
+        declaration = f'<?xml version="1.0" encoding="{encoding}"?>\n'
+        xml_str = declaration + xml_str
+
+    # ── Stats ──────────────────────────────────────
+    def count_keys(obj):
+        if isinstance(obj, dict):
+            return len(obj) + sum(count_keys(v) for v in obj.values())
+        if isinstance(obj, list):
+            return sum(count_keys(i) for i in obj)
+        return 0
+
+    def get_depth(obj, level=0):
+        if isinstance(obj, dict):
+            if not obj:
+                return level
+            return max(get_depth(v, level + 1) for v in obj.values())
+        if isinstance(obj, list):
+            if not obj:
+                return level
+            return max(get_depth(i, level + 1) for i in obj)
+        return level
+
+    return {
+        "xml": xml_str,
+        "type": (
+            "object"
+            if isinstance(data, dict)
+            else "array" if isinstance(data, list) else "other"
+        ),
+        "key_count": count_keys(data),
+        "item_count": len(data) if isinstance(data, (dict, list)) else 1,
+        "depth": get_depth(data),
+        "size_original": input_size,
+        "size_xml": len(xml_str),
+        "size_original_kb": round(input_size / 1024, 2),
+        "size_xml_kb": round(len(xml_str) / 1024, 2),
+        "root_element": root_element,
+        "item_element": item_element,
+        "encoding": encoding,
+    }
 
 
+def _prettify_xml(element, indent: int = 2) -> str:
+    """
+    Pretty-print XML element with proper indentation.
+    Pure Python — no minidom dependency.
+    """
+    import xml.etree.ElementTree as ET
+
+    def _indent(el, level=0):
+        pad = "\n" + " " * indent * level
+        if len(el):
+            if not el.text or not el.text.strip():
+                el.text = pad + " " * indent
+            if not el.tail or not el.tail.strip():
+                el.tail = pad
+            for child in el:
+                _indent(child, level + 1)
+            if not child.tail or not child.tail.strip():
+                child.tail = pad
+        else:
+            if level and (not el.tail or not el.tail.strip()):
+                el.tail = pad
+        return el
+
+    _indent(element)
+    return ET.tostring(element, encoding="unicode")

@@ -16,7 +16,11 @@ from ..views import (
     WordToPDFView,
     LaTeXToPDFView,
     PDFToMOBIView,
+    HTMLToEPUBView,
+    PDFToEPUBView,
+    IPYNBToPDFView,
 )
+
 
 urlpatterns = [
     path("tools/pdf-to-word", PDFToWordView.as_view(), name="pdf-to-word"),
@@ -35,4 +39,7 @@ urlpatterns = [
     path("tools/word-to-pdf", WordToPDFView.as_view(), name="word-to-pdf"),
     path("tools/latex-to-pdf", LaTeXToPDFView.as_view(), name="latex-to-pdf"),
     path("tools/pdf-to-mobi", PDFToMOBIView.as_view(), name="pdf-to-mobi"),
+    path("tools/html-to-epub", HTMLToEPUBView.as_view(), name="html-to-epub"),
+    path("tools/pdf-to-epub", PDFToEPUBView.as_view(), name="pdf-to-epub"),
+    path("tools/ipynb-to-pdf", IPYNBToPDFView.as_view(), name="ipynb-to-pdf"),
 ]

@@ -2512,3 +2512,1126 @@ def _pdf_to_mobi_python(
             "Install Calibre for native MOBI output."
         ),
     }
+
+
+def html_to_epub(
+    source,
+    filename: str = "document.html",
+    title: str = "",
+    author: str = "",
+    language: str = "en",
+    description: str = "",
+    publisher: str = "",
+    cover_image: bytes = None,
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Convert HTML (file or text) → EPUB.
+
+    Args:
+        source      : file object | raw HTML string | bytes
+        filename    : original filename
+        title       : book title                (default: from <title> tag)
+        author      : book author               (default: from <meta author>)
+        language    : book language code        (default: en)
+        description : book description          (default: from <meta description>)
+        publisher   : book publisher            (default: '')
+        cover_image : cover image bytes PNG/JPG (default: None)
+        encoding    : input encoding            (default: utf-8)
+
+    Returns:
+        {
+            'bytes'       : bytes,
+            'title'       : str,
+            'author'      : str,
+            'chapters'    : int,
+            'images'      : int,
+            'size_kb'     : float,
+            'toc'         : list,
+        }
+    """
+    import ebooklib
+    from ebooklib import epub
+    from bs4 import BeautifulSoup, Tag
+    import re
+    import base64
+    import hashlib
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+    elif isinstance(source, str):
+        raw = source
+    else:
+        raise ValueError("source must be a string, bytes, or file object.")
+
+    if not raw.strip():
+        raise ValueError("Empty input.")
+
+    # ── Parse HTML ────────────────────────────────
+    soup = BeautifulSoup(raw, "lxml")
+
+    # ── Extract metadata from HTML ────────────────
+    if not title:
+        title_tag = soup.find("title")
+        title = (
+            title_tag.get_text(strip=True)
+            if title_tag
+            else filename.replace(".html", "").replace(".htm", "")
+        )
+
+    if not author:
+        author_meta = soup.find("meta", attrs={"name": "author"})
+        author = author_meta.get("content", "") if author_meta else ""
+
+    if not description:
+        desc_meta = soup.find("meta", attrs={"name": "description"})
+        description = desc_meta.get("content", "") if desc_meta else ""
+
+    # ── Extract inline CSS ─────────────────────────
+    inline_css = ""
+    for style_tag in soup.find_all("style"):
+        inline_css += style_tag.get_text() + "\n"
+        style_tag.decompose()
+
+    # ── Base CSS ───────────────────────────────────
+    base_css = (
+        """
+body  {
+    font-family   : Georgia, serif;
+    font-size     : 1em;
+    line-height   : 1.7;
+    margin        : 1em;
+    color         : #222;
+    text-align    : justify;
+}
+h1, h2, h3, h4, h5, h6 {
+    font-family   : Arial, sans-serif;
+    line-height   : 1.3;
+    margin        : 1em 0 0.5em;
+    color         : #111;
+}
+h1 { font-size: 1.6em; border-bottom: 2px solid #ccc; padding-bottom: 0.3em; }
+h2 { font-size: 1.4em; }
+h3 { font-size: 1.2em; }
+p  { margin: 0.6em 0; }
+a  { color: #2E75B6; text-decoration: underline; }
+img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
+table {
+    width         : 100%;
+    border-collapse: collapse;
+    margin        : 1em 0;
+}
+th, td {
+    border   : 1px solid #ccc;
+    padding  : 0.4em 0.6em;
+    text-align: left;
+}
+th { background: #f0f0f0; font-weight: bold; }
+tr:nth-child(even) { background: #f9f9f9; }
+blockquote {
+    border-left  : 4px solid #2E75B6;
+    margin       : 1em 2em;
+    padding      : 0.5em 1em;
+    color        : #555;
+    font-style   : italic;
+}
+code, pre {
+    font-family  : Courier, monospace;
+    font-size    : 0.9em;
+    background   : #f5f5f5;
+    padding      : 0.2em 0.4em;
+    border-radius: 3px;
+}
+pre {
+    padding      : 0.8em;
+    overflow-x   : auto;
+    white-space  : pre-wrap;
+}
+ul, ol { margin: 0.5em 0 0.5em 1.5em; }
+li     { margin: 0.3em 0; }
+hr     { border: none; border-top: 1px solid #ccc; margin: 1.5em 0; }
+"""
+        + inline_css
+    )
+
+    # ── Create EPUB ───────────────────────────────
+    book = epub.EpubBook()
+    book.set_title(title)
+    book.set_language(language)
+    book.set_identifier(f"html-{hashlib.md5(raw.encode()).hexdigest()[:12]}")
+    if author:
+        book.add_author(author)
+    if description:
+        book.add_metadata("DC", "description", description)
+    if publisher:
+        book.add_metadata("DC", "publisher", publisher)
+
+    # ── Add CSS ───────────────────────────────────
+    css_item = epub.EpubItem(
+        uid="style_main",
+        file_name="styles/main.css",
+        media_type="text/css",
+        content=base_css.encode("utf-8"),
+    )
+    book.add_item(css_item)
+
+    # ── Add cover image ───────────────────────────
+    if cover_image:
+        try:
+            from PIL import Image as PILImage
+
+            img = PILImage.open(io.BytesIO(cover_image))
+            ext = img.format.lower() if img.format else "jpeg"
+            mt = f"image/{ext}"
+            cov_item = epub.EpubItem(
+                uid="cover_img",
+                file_name=f"images/cover.{ext}",
+                media_type=mt,
+                content=cover_image,
+            )
+            book.add_item(cov_item)
+            book.set_cover(f"images/cover.{ext}", cover_image)
+        except Exception:
+            pass
+
+    # ── Extract embedded images ────────────────────
+    image_count = 0
+    image_map = {}  # src → epub filename
+
+    for img_tag in soup.find_all("img"):
+        src = img_tag.get("src", "")
+        if not src or src in image_map:
+            continue
+
+        img_bytes = None
+        media_type = "image/jpeg"
+
+        # ── Base64 embedded image ──────────────────
+        if src.startswith("data:image"):
+            try:
+                header, b64data = src.split(",", 1)
+                mt_match = re.search(r"data:([^;]+)", header)
+                media_type = mt_match.group(1) if mt_match else "image/jpeg"
+                img_bytes = base64.b64decode(b64data)
+            except Exception:
+                continue
+
+        if img_bytes:
+            image_count += 1
+            ext = media_type.split("/")[-1].replace("jpeg", "jpg")
+            epub_src = f"images/img_{image_count}.{ext}"
+
+            img_item = epub.EpubItem(
+                uid=f"img_{image_count}",
+                file_name=epub_src,
+                media_type=media_type,
+                content=img_bytes,
+            )
+            book.add_item(img_item)
+            image_map[src] = epub_src
+            img_tag["src"] = epub_src
+
+    # ── Split HTML into chapters ───────────────────
+    # Strategy: split on H1/H2 headings
+    body = soup.find("body") or soup
+
+    chapters_data = _split_html_into_chapters(body, title)
+
+    if not chapters_data:
+        # No headings — treat as single chapter
+        chapters_data = [
+            {
+                "title": title,
+                "content": str(body),
+            }
+        ]
+
+    # ── Build EPUB chapters ────────────────────────
+    epub_chapters = []
+    toc = []
+
+    for ch_idx, ch in enumerate(chapters_data):
+        ch_title = ch["title"]
+        ch_content = ch["content"]
+
+        # Fix image src in chapter content
+        for old_src, new_src in image_map.items():
+            ch_content = ch_content.replace(old_src, new_src)
+
+        # Build XHTML content
+        xhtml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            "<!DOCTYPE html>\n"
+            '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+            "<head>\n"
+            f"  <title>{_escape_xml(ch_title)}</title>\n"
+            '  <link rel="stylesheet" type="text/css" '
+            'href="../styles/main.css"/>\n'
+            "</head>\n"
+            "<body>\n"
+            f"{ch_content}\n"
+            "</body>\n"
+            "</html>"
+        )
+
+        chapter = epub.EpubHtml(
+            title=ch_title,
+            file_name=f"chapters/chapter_{ch_idx:03d}.xhtml",
+            lang=language,
+            content=xhtml.encode("utf-8"),
+        )
+        chapter.add_item(css_item)
+        book.add_item(chapter)
+        epub_chapters.append(chapter)
+
+        toc.append(
+            epub.Link(
+                f"chapters/chapter_{ch_idx:03d}.xhtml",
+                ch_title,
+                f"chapter_{ch_idx}",
+            )
+        )
+
+    # ── Set spine + TOC ───────────────────────────
+    book.spine = ["nav"] + epub_chapters
+    book.toc = toc
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    # ── Write EPUB ────────────────────────────────
+    buf = io.BytesIO()
+    epub.write_epub(buf, book, {})
+    buf.seek(0)
+    epub_bytes = buf.read()
+
+    return {
+        "bytes": epub_bytes,
+        "title": title,
+        "author": author,
+        "language": language,
+        "chapters": len(epub_chapters),
+        "images": image_count,
+        "size_kb": round(len(epub_bytes) / 1024, 2),
+        "size_mb": round(len(epub_bytes) / (1024 * 1024), 2),
+        "toc": [t.title for t in toc],
+        "description": description,
+    }
+
+
+def _split_html_into_chapters(body, default_title: str) -> list:
+    """
+    Split HTML body into chapters based on H1/H2 headings.
+    Returns list of { 'title': str, 'content': str }
+    """
+    from bs4 import Tag, NavigableString
+    import re
+
+    chapters = []
+    current_title = default_title
+    current_parts = []
+
+    for element in body.children:
+        if not isinstance(element, Tag):
+            if isinstance(element, NavigableString) and str(element).strip():
+                current_parts.append(str(element))
+            continue
+
+        tag = element.name.lower() if element.name else ""
+
+        if tag in ("h1", "h2"):
+            # Save previous chapter
+            if current_parts:
+                chapters.append(
+                    {
+                        "title": current_title,
+                        "content": "".join(current_parts),
+                    }
+                )
+            current_title = element.get_text(strip=True) or current_title
+            current_parts = [str(element)]
+        else:
+            current_parts.append(str(element))
+
+    # Save last chapter
+    if current_parts:
+        chapters.append(
+            {
+                "title": current_title,
+                "content": "".join(current_parts),
+            }
+        )
+
+    return chapters
+
+
+def _escape_xml(text: str) -> str:
+    """Escape XML special characters."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def pdf_to_epub(
+    source,
+    filename: str = "document.pdf",
+    title: str = "",
+    author: str = "",
+    language: str = "en",
+    description: str = "",
+    publisher: str = "",
+    password: str = None,
+    image_dpi: int = 150,
+    image_quality: int = 75,
+    extract_text: bool = True,
+) -> dict:
+    """
+    Convert PDF → EPUB.
+
+    Strategy:
+        1. Extract text blocks per page using pymupdf
+        2. Render each page as JPEG image
+        3. Build EPUB with text + image per chapter (page)
+        4. Full metadata + TOC + CSS
+
+    Args:
+        source         : file object OR raw bytes
+        filename       : original filename
+        title          : book title           (default: filename)
+        author         : book author          (default: '')
+        language       : language code        (default: en)
+        description    : book description     (default: '')
+        publisher      : publisher name       (default: '')
+        password       : PDF password         (default: None)
+        image_dpi      : page render DPI      (default: 150)
+        image_quality  : JPEG quality 1-95    (default: 75)
+        extract_text   : extract text content (default: True)
+
+    Returns:
+        {
+            'bytes'   : bytes,
+            'title'   : str,
+            'author'  : str,
+            'pages'   : int,
+            'chapters': int,
+            'size_kb' : float,
+            'size_mb' : float,
+            'toc'     : list,
+        }
+    """
+    import fitz
+    import ebooklib
+    from ebooklib import epub
+    from PIL import Image
+    import hashlib
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+        if not title:
+            title = (
+                getattr(source, "name", filename)
+                .replace(".pdf", "")
+                .replace(".PDF", "")
+            )
+    elif isinstance(source, bytes):
+        pdf_bytes = source
+    else:
+        raise ValueError("source must be a file object or bytes.")
+
+    if not pdf_bytes:
+        raise ValueError("Empty file.")
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    if not title:
+        title = filename.replace(".pdf", "").replace(".PDF", "")
+
+    # ── Decrypt if needed ──────────────────────────
+    if password:
+        from pypdf import PdfReader, PdfWriter
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        if reader.is_encrypted:
+            if reader.decrypt(password) == 0:
+                raise ValueError("Wrong PDF password.")
+            writer = PdfWriter()
+            for page in reader.pages:
+                writer.add_page(page)
+            buf = io.BytesIO()
+            writer.write(buf)
+            buf.seek(0)
+            pdf_bytes = buf.read()
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = len(doc)
+
+    if total_pages == 0:
+        raise ValueError("PDF has no pages.")
+
+    # ── Extract PDF metadata ───────────────────────
+    meta = doc.metadata or {}
+    if not author:
+        author = meta.get("author", "")
+    if not description:
+        description = meta.get("subject", "")
+    if not publisher:
+        publisher = meta.get("creator", "")
+
+    # ── Create EPUB ───────────────────────────────
+    book = epub.EpubBook()
+    book.set_title(title)
+    book.set_language(language)
+    book.set_identifier(f"pdf-{hashlib.md5(pdf_bytes[:1024]).hexdigest()[:12]}")
+    if author:
+        book.add_author(author)
+    if description:
+        book.add_metadata("DC", "description", description)
+    if publisher:
+        book.add_metadata("DC", "publisher", publisher)
+
+    # ── Add CSS ───────────────────────────────────
+    css_content = b"""
+body {
+    font-family   : Georgia, serif;
+    font-size     : 1em;
+    line-height   : 1.8;
+    margin        : 1em;
+    color         : #222;
+    text-align    : justify;
+}
+h1 {
+    font-family   : Arial, sans-serif;
+    font-size     : 1.4em;
+    color         : #1F4E79;
+    border-bottom : 2px solid #2E75B6;
+    padding-bottom: 0.3em;
+    margin        : 0.5em 0 1em;
+}
+h2 {
+    font-family : Arial, sans-serif;
+    font-size   : 1.1em;
+    color       : #2E75B6;
+    margin      : 0.8em 0 0.4em;
+}
+p {
+    margin : 0.5em 0;
+}
+img {
+    max-width  : 100%;
+    height     : auto;
+    display    : block;
+    margin     : 1em auto;
+    border     : 1px solid #ddd;
+    box-shadow : 0 2px 4px rgba(0,0,0,0.1);
+}
+.page-image {
+    width   : 100%;
+    margin  : 0;
+    padding : 0;
+    border  : none;
+    box-shadow: none;
+}
+.page-num {
+    font-size   : 0.8em;
+    color       : #999;
+    text-align  : center;
+    margin      : 0.5em 0;
+}
+.text-content {
+    margin        : 1em 0;
+    padding       : 0.5em;
+    background    : #fafafa;
+    border-left   : 3px solid #2E75B6;
+}
+.no-text {
+    color      : #aaa;
+    font-style : italic;
+    text-align : center;
+    font-size  : 0.9em;
+}
+"""
+
+    css_item = epub.EpubItem(
+        uid="style_main",
+        file_name="styles/main.css",
+        media_type="text/css",
+        content=css_content,
+    )
+    book.add_item(css_item)
+
+    # ── Process cover from first page ─────────────
+    cover_page = doc[0]
+    cover_pixmap = cover_page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
+    cover_img = Image.frombytes(
+        "RGB",
+        [cover_pixmap.width, cover_pixmap.height],
+        cover_pixmap.samples,
+    )
+    cover_buf = io.BytesIO()
+    cover_img.save(cover_buf, format="JPEG", quality=85)
+    cover_buf.seek(0)
+    cover_bytes = cover_buf.read()
+    book.set_cover("images/cover.jpg", cover_bytes)
+
+    # ── Process each page ──────────────────────────
+    chapters = []
+    toc = []
+    spine = ["nav"]
+
+    matrix = fitz.Matrix(image_dpi / 72, image_dpi / 72)
+
+    for page_num in range(total_pages):
+        page = doc[page_num]
+        page_label = f"Page {page_num + 1}"
+
+        # ── Render page as JPEG ─────────────────────
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        img = Image.frombytes(
+            "RGB",
+            [pixmap.width, pixmap.height],
+            pixmap.samples,
+        )
+        img_buf = io.BytesIO()
+        img.save(
+            img_buf,
+            format="JPEG",
+            quality=image_quality,
+            optimize=True,
+        )
+        img_buf.seek(0)
+        img_bytes = img_buf.read()
+
+        # Add image to EPUB
+        img_item = epub.EpubItem(
+            uid=f"img_page_{page_num}",
+            file_name=f"images/page_{page_num:04d}.jpg",
+            media_type="image/jpeg",
+            content=img_bytes,
+        )
+        book.add_item(img_item)
+
+        # ── Extract text ────────────────────────────
+        text_html = ""
+        if extract_text:
+            blocks = page.get_text("blocks")
+            text_parts = []
+
+            for block in blocks:
+                if block[6] == 0:  # text block type
+                    block_text = block[4].strip()
+                    if not block_text:
+                        continue
+
+                    # Clean text
+                    block_text = (
+                        block_text.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace("\n", " ")
+                        .strip()
+                    )
+
+                    if block_text:
+                        text_parts.append(f"<p>{block_text}</p>")
+
+            if text_parts:
+                text_html = (
+                    '<div class="text-content">\n' + "\n".join(text_parts) + "\n</div>"
+                )
+            else:
+                text_html = (
+                    '<p class="no-text">' "[No extractable text on this page]" "</p>"
+                )
+
+        # ── Build chapter XHTML ─────────────────────
+        xhtml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            "<!DOCTYPE html>\n"
+            '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+            "<head>\n"
+            f"  <title>{_escape_xml(page_label)}</title>\n"
+            '  <link rel="stylesheet" type="text/css" '
+            'href="../styles/main.css"/>\n'
+            "</head>\n"
+            "<body>\n"
+            f"  <h1>{_escape_xml(page_label)}</h1>\n"
+            f'  <p class="page-num">— {page_num + 1} / {total_pages} —</p>\n'
+            f'  <img class="page-image" '
+            f'src="../images/page_{page_num:04d}.jpg" '
+            f'alt="{_escape_xml(page_label)}"/>\n'
+            f"{text_html}\n"
+            "</body>\n"
+            "</html>"
+        )
+
+        chapter = epub.EpubHtml(
+            title=page_label,
+            file_name=f"chapters/page_{page_num:04d}.xhtml",
+            lang=language,
+            content=xhtml.encode("utf-8"),
+        )
+        chapter.add_item(css_item)
+        book.add_item(chapter)
+        chapters.append(chapter)
+        spine.append(chapter)
+        toc.append(
+            epub.Link(
+                f"chapters/page_{page_num:04d}.xhtml",
+                page_label,
+                f"page_{page_num}",
+            )
+        )
+
+    doc.close()
+
+    # ── Set spine + TOC ───────────────────────────
+    book.spine = spine
+    book.toc = toc
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    # ── Write EPUB ────────────────────────────────
+    buf = io.BytesIO()
+    epub.write_epub(buf, book, {})
+    buf.seek(0)
+    epub_bytes = buf.read()
+
+    return {
+        "bytes": epub_bytes,
+        "title": title,
+        "author": author,
+        "language": language,
+        "pages": total_pages,
+        "chapters": len(chapters),
+        "size_kb": round(len(epub_bytes) / 1024, 2),
+        "size_mb": round(len(epub_bytes) / (1024 * 1024), 2),
+        "toc": [t.title for t in toc],
+        "description": description,
+        "publisher": publisher,
+    }
+
+
+def ipynb_to_pdf(
+    source,
+    filename: str = "notebook.ipynb",
+    title: str = "",
+    author: str = "",
+    include_input: bool = True,
+    include_output: bool = True,
+    include_markdown: bool = True,
+    theme: str = "light",
+) -> dict:
+    """
+    Convert Jupyter Notebook (.ipynb) → PDF.
+
+    Strategy:
+        1. Parse .ipynb JSON structure
+        2. Walk cells: markdown → rendered HTML, code → styled block
+        3. Build full HTML document with embedded CSS
+        4. Convert HTML → PDF via weasyprint
+
+    Args:
+        source           : file object OR raw bytes
+        filename         : original filename
+        title            : document title        (default: filename)
+        author           : author name           (default: '')
+        include_input    : render code inputs     (default: True)
+        include_output   : render cell outputs    (default: True)
+        include_markdown : render markdown cells  (default: True)
+        theme            : 'light' or 'dark'      (default: 'light')
+
+    Returns:
+        {
+            'bytes'         : bytes,
+            'title'         : str,
+            'author'        : str,
+            'total_cells'   : int,
+            'code_cells'    : int,
+            'markdown_cells': int,
+            'size_kb'       : float,
+            'size_mb'       : float,
+        }
+    """
+    import json
+    import re
+    from weasyprint import HTML as WeasyprintHTML
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if not title:
+            title = getattr(source, "name", filename)
+    elif isinstance(source, bytes):
+        raw = source
+    else:
+        raise ValueError("source must be a file object or bytes.")
+
+    if not raw:
+        raise ValueError("Empty file.")
+
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+
+    try:
+        nb = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid .ipynb JSON: {e}")
+
+    if not title:
+        title = filename.replace(".ipynb", "").replace(".IPYNB", "")
+
+    # ── Extract notebook metadata ──────────────────
+    nb_meta = nb.get("metadata", {})
+    kernelspec = nb_meta.get("kernelspec", {})
+    language = kernelspec.get("language", "python")
+    cells = nb.get("cells", [])
+
+    # ── Helpers ───────────────────────────────────
+    def _escape(text: str) -> str:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _source(cell) -> str:
+        src = cell.get("source", [])
+        if isinstance(src, list):
+            return "".join(src)
+        return src
+
+    def _inline_md(text: str) -> str:
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+        text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+        text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
+        text = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", text)
+        text = re.sub(r"_([^_]+)_", r"<em>\1</em>", text)
+        return text
+
+    def _render_markdown(text: str) -> str:
+        lines = text.split("\n")
+        html = []
+        in_list = False
+        for line in lines:
+            m = re.match(r"^(#{1,6})\s+(.*)", line)
+            if m:
+                if in_list:
+                    html.append("</ul>")
+                    in_list = False
+                level = len(m.group(1))
+                html.append(f"<h{level}>{_inline_md(m.group(2))}</h{level}>")
+                continue
+            m = re.match(r"^[\-\*]\s+(.*)", line)
+            if m:
+                if not in_list:
+                    html.append("<ul>")
+                    in_list = True
+                html.append(f"<li>{_inline_md(m.group(1))}</li>")
+                continue
+            if in_list and not line.strip():
+                html.append("</ul>")
+                in_list = False
+            if not line.strip():
+                html.append("<br/>")
+                continue
+            html.append(f"<p>{_inline_md(line)}</p>")
+        if in_list:
+            html.append("</ul>")
+        return "\n".join(html)
+
+    def _render_output(output) -> str:
+        otype = output.get("output_type", "")
+        parts = []
+
+        if otype == "stream":
+            text = "".join(output.get("text", []))
+            cls = "out-stderr" if output.get("name") == "stderr" else "out-stdout"
+            parts.append(f'<pre class="cell-output {cls}">{_escape(text)}</pre>')
+
+        elif otype in ("display_data", "execute_result"):
+            data = output.get("data", {})
+            for mime in ("image/png", "image/jpeg", "image/svg+xml"):
+                if mime in data:
+                    if mime == "image/svg+xml":
+                        svg = (
+                            "".join(data[mime])
+                            if isinstance(data[mime], list)
+                            else data[mime]
+                        )
+                        parts.append(f'<div class="cell-image">{svg}</div>')
+                    else:
+                        img_data = (
+                            "".join(data[mime])
+                            if isinstance(data[mime], list)
+                            else data[mime]
+                        )
+                        parts.append(
+                            f'<div class="cell-image">'
+                            f'<img src="data:{mime};base64,{img_data}" alt="output"/>'
+                            f"</div>"
+                        )
+                    break
+            if not parts and "text/plain" in data:
+                text = (
+                    "".join(data["text/plain"])
+                    if isinstance(data["text/plain"], list)
+                    else data["text/plain"]
+                )
+                parts.append(
+                    f'<pre class="cell-output out-stdout">{_escape(text)}</pre>'
+                )
+            if not parts and "text/html" in data:
+                html_out = (
+                    "".join(data["text/html"])
+                    if isinstance(data["text/html"], list)
+                    else data["text/html"]
+                )
+                parts.append(f'<div class="cell-html-output">{html_out}</div>')
+
+        elif otype == "error":
+            ename = _escape(output.get("ename", ""))
+            evalue = _escape(output.get("evalue", ""))
+            parts.append(f'<pre class="cell-output out-stderr">{ename}: {evalue}</pre>')
+
+        return "\n".join(parts)
+
+    # ── Colour palette ────────────────────────────
+    if theme == "dark":
+        bg = "#1e1e2e"
+        fg = "#cdd6f4"
+        code_bg = "#181825"
+        code_fg = "#cdd6f4"
+        out_bg = "#11111b"
+        border_col = "#313244"
+        head_col = "#89b4fa"
+        num_col = "#6c7086"
+        err_bg = "#3b1f2b"
+        err_fg = "#f38ba8"
+        md_bg = "#1e1e2e"
+    else:
+        bg = "#ffffff"
+        fg = "#212121"
+        code_bg = "#f5f5f5"
+        code_fg = "#212121"
+        out_bg = "#fafafa"
+        border_col = "#e0e0e0"
+        head_col = "#1565C0"
+        num_col = "#9e9e9e"
+        err_bg = "#fff3f3"
+        err_fg = "#c62828"
+        md_bg = "#ffffff"
+
+    # ── CSS ───────────────────────────────────────
+    css = f"""
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family : Georgia, 'Times New Roman', serif;
+    font-size   : 11pt;
+    line-height : 1.7;
+    color       : {fg};
+    background  : {bg};
+    padding     : 2cm 2.5cm;
+}}
+.title-block {{
+    text-align    : center;
+    margin-bottom : 2em;
+    padding-bottom: 1em;
+    border-bottom : 3px solid {head_col};
+}}
+.title-block h1 {{
+    font-size : 22pt;
+    color     : {head_col};
+    margin    : 0 0 0.3em;
+}}
+.title-block .meta {{
+    font-size : 10pt;
+    color     : {num_col};
+}}
+.cell {{
+    margin      : 0.8em 0;
+    border-left : 3px solid {border_col};
+    padding-left: 0.8em;
+}}
+.cell-code {{ border-left-color: #42a5f5; }}
+.cell-md   {{
+    border-left-color : {head_col};
+    background        : {md_bg};
+    padding           : 0.5em 0.8em;
+    border-radius     : 4px;
+}}
+.cell-raw  {{ border-left-color: {num_col}; }}
+.prompt {{
+    font-family   : 'Courier New', Courier, monospace;
+    font-size     : 8pt;
+    color         : {num_col};
+    margin-bottom : 0.2em;
+}}
+pre.cell-code-src {{
+    font-family  : 'Courier New', Courier, monospace;
+    font-size    : 9pt;
+    background   : {code_bg};
+    color        : {code_fg};
+    padding      : 0.7em 1em;
+    border-radius: 6px;
+    white-space  : pre-wrap;
+    word-break   : break-all;
+    overflow-wrap: break-word;
+    margin       : 0.3em 0;
+    border       : 1px solid {border_col};
+}}
+pre.cell-output {{
+    font-family  : 'Courier New', Courier, monospace;
+    font-size    : 9pt;
+    padding      : 0.6em 1em;
+    border-radius: 4px;
+    white-space  : pre-wrap;
+    word-break   : break-all;
+    overflow-wrap: break-word;
+    margin       : 0.3em 0;
+}}
+pre.out-stdout {{
+    background : {out_bg};
+    color      : {code_fg};
+    border     : 1px solid {border_col};
+}}
+pre.out-stderr {{
+    background : {err_bg};
+    color      : {err_fg};
+    border     : 1px solid {err_fg};
+}}
+.cell-image {{
+    margin     : 0.5em 0;
+    text-align : center;
+}}
+.cell-image img {{
+    max-width : 100%;
+    height    : auto;
+}}
+.cell-html-output {{
+    font-size : 9pt;
+    max-width : 100%;
+    overflow  : hidden;
+}}
+.cell-md h1, .cell-md h2, .cell-md h3,
+.cell-md h4, .cell-md h5, .cell-md h6 {{
+    color       : {head_col};
+    margin      : 0.5em 0 0.2em;
+    line-height : 1.3;
+}}
+.cell-md h1 {{ font-size: 16pt; }}
+.cell-md h2 {{ font-size: 14pt; }}
+.cell-md h3 {{ font-size: 12pt; }}
+.cell-md p  {{ margin: 0.3em 0; }}
+.cell-md code {{
+    font-family   : 'Courier New', monospace;
+    font-size     : 9pt;
+    background    : {code_bg};
+    padding       : 0.1em 0.3em;
+    border-radius : 3px;
+}}
+.cell-md ul  {{ padding-left: 1.5em; margin: 0.3em 0; }}
+.cell-md li  {{ margin: 0.15em 0; }}
+.cell-md strong {{ font-weight: 700; }}
+@media print {{ .cell {{ page-break-inside: avoid; }} }}
+"""
+
+    # ── Build HTML body ───────────────────────────
+    body_parts = []
+    exec_count = 0
+    total_code = 0
+    total_md = 0
+
+    for cell in cells:
+        ctype = cell.get("cell_type", "")
+        src = _source(cell)
+        ex_num = cell.get("execution_count") or ""
+
+        if ctype == "code":
+            total_code += 1
+            parts = []
+            if include_input and src.strip():
+                exec_count += 1
+                num = ex_num if ex_num else exec_count
+                parts.append(
+                    f'<div class="prompt">In [{num}]:</div>'
+                    f'<pre class="cell-code-src">{_escape(src)}</pre>'
+                )
+            if include_output:
+                for out in cell.get("outputs", []):
+                    rendered = _render_output(out)
+                    if rendered:
+                        num = ex_num if ex_num else exec_count
+                        parts.append(
+                            f'<div class="prompt">Out [{num}]:</div>' + rendered
+                        )
+            if parts:
+                body_parts.append(
+                    '<div class="cell cell-code">' + "\n".join(parts) + "</div>"
+                )
+
+        elif ctype == "markdown" and include_markdown:
+            total_md += 1
+            if src.strip():
+                body_parts.append(
+                    f'<div class="cell cell-md">{_render_markdown(src)}</div>'
+                )
+
+        elif ctype == "raw":
+            if src.strip():
+                body_parts.append(
+                    f'<div class="cell cell-raw">'
+                    f'<pre class="cell-code-src">{_escape(src)}</pre>'
+                    f"</div>"
+                )
+
+    # ── Title block ───────────────────────────────
+    meta_parts = []
+    if author:
+        meta_parts.append(_escape(author))
+    meta_parts.append(f"{language.capitalize()} kernel")
+    meta_line = " &nbsp;|&nbsp; ".join(meta_parts)
+
+    title_block = (
+        f'<div class="title-block">'
+        f"<h1>{_escape(title)}</h1>"
+        f'<div class="meta">{meta_line}</div>'
+        f"</div>"
+    )
+
+    # ── Full HTML ─────────────────────────────────
+    full_html = (
+        "<!DOCTYPE html>"
+        "<html><head>"
+        '<meta charset="utf-8"/>'
+        f"<title>{_escape(title)}</title>"
+        f"<style>{css}</style>"
+        "</head><body>" + title_block + "\n".join(body_parts) + "</body></html>"
+    )
+
+    # ── Render PDF ────────────────────────────────
+    pdf_buf = io.BytesIO()
+    WeasyprintHTML(string=full_html).write_pdf(pdf_buf)
+    pdf_buf.seek(0)
+    pdf_bytes = pdf_buf.read()
+
+    if not pdf_bytes:
+        raise ValueError("PDF rendering produced empty output.")
+
+    return {
+        "bytes": pdf_bytes,
+        "title": title,
+        "author": author,
+        "total_cells": len(cells),
+        "code_cells": total_code,
+        "markdown_cells": total_md,
+        "size_kb": round(len(pdf_bytes) / 1024, 2),
+        "size_mb": round(len(pdf_bytes) / (1024 * 1024), 2),
+    }

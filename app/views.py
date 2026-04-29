@@ -54,8 +54,11 @@ from .services.excel_service import (
     excel_to_csv,
     excel_to_markdown,
     markdown_to_excel,
-    sql_to_excel
+    sql_to_excel,
+    merge_excel
 )
+
+
 from .services.word_service import (
     word_to_pdf,
     word_to_jpg,
@@ -67,6 +70,8 @@ from .services.word_service import (
     split_docx,
     word_to_latex
 )
+
+
 from .services.base64_service import (
     base64_encode,
     base64_decode,
@@ -6661,4 +6666,92 @@ class IPYNBToPDFView(APIView):
         response["X-Markdown-Cells"] = result["markdown_cells"]
         response["X-Size-KB"] = result["size_kb"]
         response["X-Size-MB"] = result["size_mb"]
+        return response
+
+
+
+
+class MergeExcelView(APIView):
+    """
+    POST /api/convert/merge-excel/
+    Upload multiple .xlsx files → returns merged .xlsx.
+
+    Form fields:
+        files[]          : one or more .xlsx files           (required)
+        mode             : stack | separate_sheets | side_by_side  (default: stack)
+        add_source_col   : true | false                      (default: true)
+        source_col_name  : column label for source filename  (default: _source_file)
+        skip_empty       : true | false  skip empty sheets   (default: true)
+    """
+    parser_classes     = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        files           = request.FILES.getlist('files[]')
+        mode            = request.data.get('mode',            'stack')
+        add_source_col  = request.data.get('add_source_col',  'true')
+        source_col_name = request.data.get('source_col_name', '_source_file')
+        skip_empty      = request.data.get('skip_empty',      'true')
+
+        # ── Validate ──────────────────────────────
+        if not files:
+            return Response(
+                {'error': 'No files provided. Use files[] field.'},
+                status=400,
+            )
+        if len(files) < 2:
+            return Response(
+                {'error': 'At least 2 files are required for merging.'},
+                status=400,
+            )
+        if mode not in ('stack', 'separate_sheets', 'side_by_side'):
+            return Response(
+                {'error': 'mode must be "stack", "separate_sheets", or "side_by_side".'},
+                status=400,
+            )
+        for f in files:
+            if not f.name.lower().endswith(('.xlsx', '.xls')):
+                return Response(
+                    {'error': f'"{f.name}" is not a valid Excel file. Only .xlsx files are accepted.'},
+                    status=400,
+                )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool): return val
+            return str(val).lower() == 'true'
+
+        add_source_col = to_bool(add_source_col)
+        skip_empty     = to_bool(skip_empty)
+
+        # ── Build sources list ─────────────────────
+        sources = [(f.name, f) for f in files]
+
+        # ── Merge ─────────────────────────────────
+        try:
+            result = merge_excel(
+                sources,
+                mode           =mode,
+                add_source_col =add_source_col,
+                source_col_name=str(source_col_name),
+                skip_empty     =skip_empty,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        # ── Return merged file ────────────────────
+        response = HttpResponse(
+            result['bytes'],
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = 'attachment; filename="merged.xlsx"'
+        response['Content-Length']      = len(result['bytes'])
+        response['X-Mode']              = result['mode']
+        response['X-Files-Merged']      = result['files_merged']
+        response['X-Sheets-Out']        = ', '.join(result['sheets_out'])
+        response['X-Total-Rows']        = result['total_rows']
+        response['X-Size-KB']           = result['size_kb']
+        response['X-Size-MB']           = result['size_mb']
         return response

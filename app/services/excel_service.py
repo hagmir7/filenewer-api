@@ -1471,3 +1471,251 @@ def _coerce_sql_value(val: str):
         pass
 
     return val
+
+
+def merge_excel(
+    sources: list,
+    mode: str = "stack",
+    add_source_col: bool = True,
+    source_col_name: str = "_source_file",
+    skip_empty: bool = True,
+) -> dict:
+    """
+    Merge multiple Excel files (.xlsx) into one workbook.
+
+    Modes:
+        stack          : Append rows from same-named sheets across files.
+                         One output sheet per unique sheet name.
+        separate_sheets: Each file's sheets become separate tabs,
+                         prefixed with the filename.
+        side_by_side   : Place each file's data horizontally next to
+                         each other, one output sheet per sheet name.
+
+    Args:
+        sources         : list of (filename: str, file_obj_or_bytes)
+        mode            : 'stack' | 'separate_sheets' | 'side_by_side'
+        add_source_col  : prepend a source filename column  (default: True)
+                          — only applies to 'stack' mode
+        source_col_name : name of the source column         (default: '_source_file')
+        skip_empty      : skip sheets with no data          (default: True)
+
+    Returns:
+        {
+            'bytes'        : bytes,
+            'mode'         : str,
+            'files_merged' : int,
+            'sheets_out'   : list[str],
+            'total_rows'   : int,
+            'size_kb'      : float,
+            'size_mb'      : float,
+        }
+    """
+    import io
+    import pandas as pd
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    if not sources:
+        raise ValueError("No files provided.")
+    if mode not in ("stack", "separate_sheets", "side_by_side"):
+        raise ValueError('mode must be "stack", "separate_sheets", or "side_by_side".')
+
+    # ── Style constants ───────────────────────────
+    _thin = Side(style="thin", color="BDBDBD")
+    BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
+    HEADER_FILL = PatternFill("solid", start_color="1565C0", end_color="1565C0")
+    SOURCE_FILL = PatternFill("solid", start_color="E3F2FD", end_color="E3F2FD")
+    ALT_FILL = PatternFill("solid", start_color="F5F5F5", end_color="F5F5F5")
+    HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=11)
+    DATA_FONT = Font(name="Arial", size=10)
+    SOURCE_FONT = Font(bold=True, name="Arial", size=10, color="1565C0")
+    CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    LEFT = Alignment(horizontal="left", vertical="center")
+
+    def _style_header(cell):
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = CENTER
+        cell.border = BORDER
+
+    def _style_data(cell, alt=False, is_source=False):
+        cell.font = SOURCE_FONT if is_source else DATA_FONT
+        cell.fill = SOURCE_FILL if is_source else (ALT_FILL if alt else PatternFill())
+        cell.alignment = LEFT
+        cell.border = BORDER
+
+    def _autofit(ws):
+        for col in ws.columns:
+            w = max((len(str(c.value or "")) for c in col), default=10)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(
+                w + 4, 60
+            )
+
+    def _unique_name(name: str, used: dict) -> str:
+        base = name[:31]
+        if base not in used:
+            used[base] = 0
+            return base
+        used[base] += 1
+        suffix = f"_{used[base]}"
+        return base[: 31 - len(suffix)] + suffix
+
+    def _write_df(ws, df: pd.DataFrame, row_start: int = 1, col_start: int = 1):
+        """Write a DataFrame to a worksheet at the given offset."""
+        headers = list(df.columns)
+        for ci, h in enumerate(headers, col_start):
+            _style_header(ws.cell(row_start, ci, str(h)))
+        for ri, row in enumerate(df.itertuples(index=False), row_start + 1):
+            for ci, val in enumerate(row, col_start):
+                is_src = headers[ci - col_start] == source_col_name
+                cell = ws.cell(ri, ci, "" if pd.isna(val) else val)
+                _style_data(cell, alt=(ri % 2 == 0), is_source=is_src)
+
+    # ── Read all files ────────────────────────────
+    # all_data: {sheet_name: [(filename, df), ...]}
+    all_data: dict = {}
+    filenames: list = []
+    files_read: int = 0
+
+    for filename, file_source in sources:
+        if hasattr(file_source, "read"):
+            raw = file_source.read()
+        elif isinstance(file_source, bytes):
+            raw = file_source
+        else:
+            raise ValueError(f'Invalid source for file "{filename}".')
+
+        if not raw:
+            continue
+
+        try:
+            sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None, header=0)
+        except Exception as e:
+            raise ValueError(f'Cannot read "{filename}": {e}')
+
+        has_data = False
+        for sname, df in sheets.items():
+            if skip_empty and df.empty:
+                continue
+            has_data = True
+            all_data.setdefault(sname, []).append((filename, df.copy()))
+
+        if has_data:
+            filenames.append(filename)
+            files_read += 1
+
+    if files_read == 0:
+        raise ValueError("No readable data found in the provided files.")
+
+    # ── Build output workbook ─────────────────────
+    wb = Workbook()
+    wb.remove(wb.active)
+    used_names: dict = {}
+    total_rows: int = 0
+
+    # ── MODE: stack ───────────────────────────────
+    if mode == "stack":
+        for sname, entries in all_data.items():
+            dfs = []
+            for fname, df in entries:
+                if add_source_col:
+                    df.insert(0, source_col_name, fname)
+                dfs.append(df)
+
+            merged = pd.concat(dfs, ignore_index=True)
+            tab = _unique_name(sname, used_names)
+            ws = wb.create_sheet(title=tab)
+            _write_df(ws, merged)
+            _autofit(ws)
+            ws.freeze_panes = "A2"
+            total_rows += len(merged)
+
+    # ── MODE: separate_sheets ─────────────────────
+    elif mode == "separate_sheets":
+        for fname, file_source in sources:
+            if hasattr(file_source, "read"):
+                file_source.seek(0)
+                raw = file_source.read()
+            elif isinstance(file_source, bytes):
+                raw = file_source
+            else:
+                continue
+
+            try:
+                sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None, header=0)
+            except Exception:
+                continue
+
+            prefix = fname.replace(".xlsx", "").replace(".XLSX", "")[:20]
+            for sname, df in sheets.items():
+                if skip_empty and df.empty:
+                    continue
+                tab = _unique_name(f"{prefix}_{sname}", used_names)
+                ws = wb.create_sheet(title=tab)
+                _write_df(ws, df)
+                _autofit(ws)
+                ws.freeze_panes = "A2"
+                total_rows += len(df)
+
+    # ── MODE: side_by_side ────────────────────────
+    elif mode == "side_by_side":
+        for sname, entries in all_data.items():
+            tab = _unique_name(sname, used_names)
+            ws = wb.create_sheet(title=tab)
+            col_offset = 1
+
+            for fname, df in entries:
+                n_cols = len(df.columns)
+
+                # File label banner
+                banner = ws.cell(1, col_offset, fname)
+                banner.font = Font(bold=True, name="Arial", size=11, color="1565C0")
+                banner.fill = SOURCE_FILL
+                banner.alignment = CENTER
+                banner.border = BORDER
+                if n_cols > 1:
+                    ws.merge_cells(
+                        start_row=1,
+                        start_column=col_offset,
+                        end_row=1,
+                        end_column=col_offset + n_cols - 1,
+                    )
+
+                _write_df(ws, df, row_start=2, col_start=col_offset)
+                col_offset += n_cols + 2  # 2-column gap between blocks
+                total_rows += len(df)
+
+            _autofit(ws)
+            ws.freeze_panes = "A3"
+
+    # ── Add summary sheet ─────────────────────────
+    ws_summary = wb.create_sheet(title="_Merge Summary", index=0)
+    summary_headers = ["File", "Sheet", "Rows", "Columns"]
+    for ci, h in enumerate(summary_headers, 1):
+        _style_header(ws_summary.cell(1, ci, h))
+
+    ri = 2
+    for sname, entries in all_data.items():
+        for fname, df in entries:
+            for ci, val in enumerate([fname, sname, len(df), len(df.columns)], 1):
+                _style_data(ws_summary.cell(ri, ci, val), alt=(ri % 2 == 0))
+            ri += 1
+    _autofit(ws_summary)
+    ws_summary.freeze_panes = "A2"
+
+    # ── Write to bytes ────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    xlsx_bytes = buf.read()
+
+    return {
+        "bytes": xlsx_bytes,
+        "mode": mode,
+        "files_merged": files_read,
+        "sheets_out": wb.sheetnames,
+        "total_rows": total_rows,
+        "size_kb": round(len(xlsx_bytes) / 1024, 2),
+        "size_mb": round(len(xlsx_bytes) / (1024 * 1024), 2),
+    }

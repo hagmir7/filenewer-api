@@ -7,6 +7,7 @@ from ..views import (
     SplitDOCXView,
     WordToMarkdownView,
     MarkdownToWordView,
+    WordToLaTeXView,
 )
 
 urlpatterns = [
@@ -17,4 +18,5 @@ urlpatterns = [
     path("tools/split-docx", SplitDOCXView.as_view(), name="split-docx"),
     path("tools/word-to-markdown", WordToMarkdownView.as_view(), name="word-to-markdown"),
     path("tools/markdown-to-word", MarkdownToWordView.as_view(), name="markdown-to-word"),
+    path('tools/word-to-latex', WordToLaTeXView.as_view(), name='word-to-latex'),
 ]

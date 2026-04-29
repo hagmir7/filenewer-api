@@ -1689,3 +1689,826 @@ def split_pdf(
         raise ValueError("No content found to split.")
 
     return results
+
+
+def latex_to_pdf(
+    source,
+    filename   : str = 'document.tex',
+    engine     : str = 'pdflatex',
+    runs       : int = 2,
+    encoding   : str = 'utf-8',
+) -> dict:
+    """
+    Convert LaTeX (.tex) → PDF using available LaTeX engine.
+
+    Strategy:
+        1. Try pdflatex / xelatex / lualatex (system LaTeX)
+        2. Fallback → pure Python renderer (basic, no math)
+
+    Args:
+        source   : file object | raw LaTeX string | bytes
+        filename : original filename
+        engine   : pdflatex | xelatex | lualatex    (default: pdflatex)
+        runs     : number of compilation runs        (default: 2)
+                   2 runs needed for TOC/refs
+        encoding : input encoding                   (default: utf-8)
+
+    Returns:
+        {
+            'bytes'    : bytes,
+            'engine'   : str,
+            'log'      : str,
+            'warnings' : list,
+            'errors'   : list,
+            'pages'    : int,
+            'method'   : 'latex' | 'fallback',
+        }
+    """
+    import subprocess
+    import tempfile
+    import shutil
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, 'read'):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors='replace')
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors='replace')
+    elif isinstance(source, str):
+        raw = source
+    else:
+        raise ValueError('source must be a string, bytes, or file object.')
+
+    if not raw.strip():
+        raise ValueError('Empty input.')
+
+    # ── Validate engine ───────────────────────────
+    valid_engines = ('pdflatex', 'xelatex', 'lualatex')
+    if engine not in valid_engines:
+        engine = 'pdflatex'
+
+    # ── Try LaTeX engines ─────────────────────────
+    engines_to_try = [engine] + [
+        e for e in valid_engines if e != engine
+    ]
+
+    for eng in engines_to_try:
+        eng_path = shutil.which(eng)
+        if eng_path:
+            try:
+                result = _compile_latex(
+                    raw, filename, eng_path, eng, runs
+                )
+                return result
+            except Exception:
+                continue
+
+    # ── Fallback: pure Python ─────────────────────
+    return _latex_to_pdf_fallback(raw, filename)
+
+
+def _compile_latex(
+    latex_str : str,
+    filename  : str,
+    engine_path: str,
+    engine_name: str,
+    runs      : int,
+) -> dict:
+    """
+    Compile LaTeX using system engine in a temp directory.
+    """
+    import subprocess
+    import tempfile
+    import re
+
+    base_name = filename.replace('.tex', '').replace('.TEX', '')
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tex_path = os.path.join(tmp_dir, f'{base_name}.tex')
+        pdf_path = os.path.join(tmp_dir, f'{base_name}.pdf')
+        log_path = os.path.join(tmp_dir, f'{base_name}.log')
+
+        # ── Write .tex file ────────────────────────
+        with open(tex_path, 'w', encoding='utf-8') as f:
+            f.write(latex_str)
+
+        # ── Compile (multiple runs for TOC/refs) ───
+        full_log = ''
+        for run_num in range(runs):
+            result = subprocess.run(
+                [
+                    engine_path,
+                    '-interaction=nonstopmode',
+                    '-halt-on-error',
+                    f'-output-directory={tmp_dir}',
+                    tex_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=tmp_dir,
+            )
+            full_log += result.stdout + result.stderr
+
+        # ── Read log file ──────────────────────────
+        log_content = ''
+        if os.path.exists(log_path):
+            with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                log_content = f.read()
+
+        # ── Parse warnings and errors ──────────────
+        warnings = re.findall(
+            r'LaTeX Warning: (.+?)(?:\n|$)', log_content
+        )
+        errors = re.findall(
+            r'! (.+?)(?:\n|$)', log_content
+        )
+
+        # ── Check PDF was generated ────────────────
+        if not os.path.exists(pdf_path):
+            error_msg = errors[0] if errors else 'Compilation failed.'
+            raise RuntimeError(
+                f'{engine_name} failed: {error_msg}\n\n'
+                f'Log:\n{log_content[-2000:]}'
+            )
+
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+
+    # ── Get page count ─────────────────────────────
+    pages = _count_pdf_pages(pdf_bytes)
+
+    return {
+        'bytes'   : pdf_bytes,
+        'engine'  : engine_name,
+        'log'     : log_content[-3000:] if log_content else full_log[-3000:],
+        'warnings': warnings[:20],
+        'errors'  : errors[:10],
+        'pages'   : pages,
+        'method'  : 'latex',
+        'size_kb' : round(len(pdf_bytes) / 1024, 2),
+        'size_mb' : round(len(pdf_bytes) / (1024 * 1024), 2),
+    }
+
+
+def _latex_to_pdf_fallback(latex_str: str, filename: str) -> dict:
+    """
+    Pure Python fallback — converts LaTeX → PDF without system LaTeX.
+    Extracts text content from LaTeX and renders as PDF using reportlab.
+
+    Handles: basic text, sections, lists, tables, bold, italic, code
+    Does NOT handle: math equations, complex macros, custom packages
+    """
+    from reportlab.lib.pagesizes  import A4
+    from reportlab.lib.styles     import ParagraphStyle
+    from reportlab.lib.units      import inch
+    from reportlab.lib            import colors
+    from reportlab.lib.enums      import TA_LEFT, TA_CENTER, TA_JUSTIFY
+    from reportlab.platypus       import (
+        SimpleDocTemplate, Paragraph, Spacer,
+        Table, TableStyle, PageBreak, HRFlowable,
+    )
+    import re
+
+    # ── Strip LaTeX preamble ──────────────────────
+    # Extract only document body
+    body_match = re.search(
+        r'\\begin\{document\}(.+?)\\end\{document\}',
+        latex_str,
+        re.DOTALL,
+    )
+    body = body_match.group(1).strip() if body_match else latex_str
+
+    # ── Extract title ─────────────────────────────
+    title_match = re.search(r'\\title\{(.+?)\}', latex_str, re.DOTALL)
+    doc_title   = title_match.group(1).strip() if title_match else \
+                  filename.replace('.tex', '')
+
+    # ── Strip LaTeX commands ───────────────────────
+    def strip_latex(text: str) -> str:
+        """Convert LaTeX markup to plain/HTML for reportlab."""
+        # Bold
+        text = re.sub(r'\\textbf\{(.+?)\}',    r'<b>\1</b>',  text)
+        # Italic
+        text = re.sub(r'\\textit\{(.+?)\}',    r'<i>\1</i>',  text)
+        text = re.sub(r'\\emph\{(.+?)\}',      r'<i>\1</i>',  text)
+        # Underline
+        text = re.sub(r'\\underline\{(.+?)\}', r'<u>\1</u>',  text)
+        # Strikethrough
+        text = re.sub(r'\\sout\{(.+?)\}',      r'<strike>\1</strike>', text)
+        # Monospace
+        text = re.sub(r'\\texttt\{(.+?)\}',    r'<font name="Courier">\1</font>', text)
+        # href links
+        text = re.sub(
+            r'\\href\{[^}]+\}\{(.+?)\}',
+            r'<font color="blue"><u>\1</u></font>',
+            text,
+        )
+        # Unescape LaTeX special chars
+        text = text.replace('\\&',  '&amp;')
+        text = text.replace('\\%',  '%')
+        text = text.replace('\\$',  '$')
+        text = text.replace('\\#',  '#')
+        text = text.replace('\\_',  '_')
+        text = text.replace('\\{',  '{')
+        text = text.replace('\\}',  '}')
+        text = text.replace('\\textbackslash{}', '\\')
+        text = text.replace('\\textless{}',  '<')
+        text = text.replace('\\textgreater{}', '>')
+        text = text.replace('\\textbar{}',   '|')
+        text = text.replace('\\textasciitilde{}', '~')
+        text = text.replace('\\^{}',  '^')
+        text = text.replace('---',    '—')
+        text = text.replace('--',     '–')
+        text = text.replace('``',     '"')
+        text = text.replace("''",     '"')
+        # Remove remaining unknown commands
+        text = re.sub(r'\\[a-zA-Z]+\*?\{([^}]*)\}', r'\1', text)
+        text = re.sub(r'\\[a-zA-Z]+\*?',             '',    text)
+        return text.strip()
+
+    # ── Styles ────────────────────────────────────
+    def make_style(name, font, size, bold=False,
+                   before=6, after=6, align=TA_JUSTIFY, color=None):
+        s = ParagraphStyle(
+            name,
+            fontName   =font,
+            fontSize   =size,
+            leading    =size * 1.4,
+            spaceBefore=before,
+            spaceAfter =after,
+            alignment  =align,
+        )
+        if color:
+            s.textColor = color
+        return s
+
+    styles = {
+        'title'   : make_style('title',    'Helvetica-Bold', 20,
+                               before=12, after=12, align=TA_CENTER,
+                               color=colors.HexColor('#1F4E79')),
+        'h1'      : make_style('h1',       'Helvetica-Bold', 16,
+                               before=14, after=8,
+                               color=colors.HexColor('#2E75B6')),
+        'h2'      : make_style('h2',       'Helvetica-Bold', 14,
+                               before=12, after=6,
+                               color=colors.HexColor('#2E75B6')),
+        'h3'      : make_style('h3',       'Helvetica-Bold', 12,
+                               before=10, after=4,
+                               color=colors.HexColor('#1F4E79')),
+        'h4'      : make_style('h4',       'Helvetica-Bold', 11,
+                               before=8,  after=4,
+                               color=colors.HexColor('#1F4E79')),
+        'body'    : make_style('body',     'Helvetica',      11,
+                               before=4,  after=4),
+        'bullet'  : make_style('bullet',   'Helvetica',      11,
+                               before=2,  after=2,
+                               align=TA_LEFT),
+        'code'    : make_style('code',     'Courier',         9,
+                               before=4,  after=4,
+                               align=TA_LEFT),
+        'quote'   : make_style('quote',    'Helvetica-Oblique', 11,
+                               before=6,  after=6,
+                               align=TA_LEFT,
+                               color=colors.HexColor('#555555')),
+    }
+
+    # ── Parse body content ─────────────────────────
+    story  = []
+    buffer = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize    =A4,
+        rightMargin =inch,
+        leftMargin  =inch,
+        topMargin   =inch,
+        bottomMargin=inch,
+        title       =doc_title,
+    )
+
+    # Remove comments
+    body = re.sub(r'%[^\n]*', '', body)
+
+    # Add title
+    story.append(Paragraph(
+        doc_title.replace('&', '&amp;').replace('<', '&lt;'),
+        styles['title'],
+    ))
+    story.append(Spacer(1, 12))
+
+    # Tokenize content
+    lines   = body.split('\n')
+    i       = 0
+    total   = len(lines)
+    in_list = False
+    list_items = []
+
+    def flush_list(items):
+        if not items:
+            return
+        for item in items:
+            try:
+                story.append(Paragraph(f'• {item}', styles['bullet']))
+            except Exception:
+                story.append(Paragraph(f'• {re.sub("<[^>]+>","",item)}',
+                                       styles['bullet']))
+        story.append(Spacer(1, 4))
+
+    while i < total:
+        line     = lines[i].strip()
+
+        # ── Skip empty ─────────────────────────────
+        if not line:
+            if list_items:
+                flush_list(list_items)
+                list_items = []
+            story.append(Spacer(1, 6))
+            i += 1
+            continue
+
+        # ── maketitle ──────────────────────────────
+        if '\\maketitle' in line:
+            i += 1
+            continue
+
+        # ── tableofcontents ────────────────────────
+        if '\\tableofcontents' in line:
+            story.append(Paragraph(
+                '<b>Table of Contents</b>', styles['h2']
+            ))
+            story.append(Spacer(1, 8))
+            i += 1
+            continue
+
+        # ── newpage ────────────────────────────────
+        if '\\newpage' in line or '\\clearpage' in line:
+            flush_list(list_items)
+            list_items = []
+            story.append(PageBreak())
+            i += 1
+            continue
+
+        # ── hrule ──────────────────────────────────
+        if '\\hrule' in line:
+            flush_list(list_items)
+            list_items = []
+            story.append(HRFlowable(
+                width='100%', thickness=1,
+                color=colors.HexColor('#2E75B6'),
+                spaceAfter=6, spaceBefore=6,
+            ))
+            i += 1
+            continue
+
+        # ── Sections ───────────────────────────────
+        m = re.match(r'\\(chapter|section|subsection|subsubsection|paragraph)\*?\{(.+?)\}', line)
+        if m:
+            flush_list(list_items)
+            list_items = []
+            cmd  = m.group(1)
+            text = strip_latex(m.group(2))
+            style_map = {
+                'chapter'        : styles['h1'],
+                'section'        : styles['h1'],
+                'subsection'     : styles['h2'],
+                'subsubsection'  : styles['h3'],
+                'paragraph'      : styles['h4'],
+            }
+            s = style_map.get(cmd, styles['h1'])
+            try:
+                story.append(Paragraph(text, s))
+            except Exception:
+                story.append(Paragraph(
+                    re.sub('<[^>]+>', '', text), s
+                ))
+            i += 1
+            continue
+
+        # ── itemize / enumerate ────────────────────
+        if '\\begin{itemize}' in line or '\\begin{enumerate}' in line:
+            i += 1
+            continue
+        if '\\end{itemize}' in line or '\\end{enumerate}' in line:
+            flush_list(list_items)
+            list_items = []
+            i += 1
+            continue
+        if line.startswith('\\item'):
+            text = re.sub(r'^\\item\s*', '', line)
+            list_items.append(strip_latex(text))
+            i += 1
+            continue
+
+        # ── verbatim / lstlisting ──────────────────
+        if '\\begin{verbatim}' in line or '\\begin{lstlisting}' in line:
+            flush_list(list_items)
+            list_items = []
+            i += 1
+            code_lines = []
+            end_tag = 'verbatim' if 'verbatim' in line else 'lstlisting'
+            while i < total and f'\\end{{{end_tag}}}' not in lines[i]:
+                code_lines.append(lines[i])
+                i += 1
+            code_text = '\n'.join(code_lines)
+            try:
+                story.append(Paragraph(
+                    code_text.replace('&', '&amp;')
+                             .replace('<', '&lt;')
+                             .replace('>', '&gt;')
+                             .replace('\n', '<br/>'),
+                    styles['code'],
+                ))
+            except Exception:
+                pass
+            i += 1
+            continue
+
+        # ── quote / blockquote ─────────────────────
+        if '\\begin{quote}' in line or '\\begin{quotation}' in line:
+            flush_list(list_items)
+            list_items = []
+            i += 1
+            quote_lines = []
+            end_tag = 'quote' if 'quote' in line else 'quotation'
+            while i < total and f'\\end{{{end_tag}}}' not in lines[i]:
+                quote_lines.append(strip_latex(lines[i]))
+                i += 1
+            quote_text = ' '.join(quote_lines)
+            try:
+                story.append(Paragraph(quote_text, styles['quote']))
+            except Exception:
+                story.append(Paragraph(
+                    re.sub('<[^>]+>', '', quote_text),
+                    styles['quote'],
+                ))
+            i += 1
+            continue
+
+        # ── table ──────────────────────────────────
+        if '\\begin{tabular}' in line:
+            flush_list(list_items)
+            list_items = []
+            i += 1
+            tbl_lines = []
+            while i < total and '\\end{tabular}' not in lines[i]:
+                tbl_lines.append(lines[i])
+                i += 1
+
+            tbl_data = []
+            for tl in tbl_lines:
+                tl = tl.strip()
+                if tl in ('\\hline', ''):
+                    continue
+                if tl.endswith('\\\\'):
+                    tl = tl[:-2].strip()
+                cells = [
+                    strip_latex(c.strip())
+                    for c in tl.split('&')
+                ]
+                if cells:
+                    tbl_data.append(cells)
+
+            if tbl_data:
+                num_cols = max(len(r) for r in tbl_data)
+                tbl_data = [
+                    r + [''] * (num_cols - len(r))
+                    for r in tbl_data
+                ]
+                col_w    = (A4[0] - 2 * inch) / num_cols
+
+                tbl_rows = []
+                for r_idx, row in enumerate(tbl_data):
+                    tbl_row = []
+                    for cell in row:
+                        try:
+                            p = Paragraph(
+                                cell if cell else '',
+                                ParagraphStyle(
+                                    f'tc_{r_idx}',
+                                    fontName='Helvetica-Bold'
+                                             if r_idx == 0
+                                             else 'Helvetica',
+                                    fontSize=9,
+                                    textColor=colors.white
+                                              if r_idx == 0
+                                              else colors.black,
+                                    leading=12,
+                                )
+                            )
+                        except Exception:
+                            p = Paragraph(
+                                re.sub('<[^>]+>', '', cell),
+                                ParagraphStyle(
+                                    f'tc_plain_{r_idx}',
+                                    fontName='Helvetica',
+                                    fontSize=9,
+                                    leading=12,
+                                )
+                            )
+                        tbl_row.append(p)
+                    tbl_rows.append(tbl_row)
+
+                pdf_tbl = Table(
+                    tbl_rows,
+                    colWidths=[col_w] * num_cols,
+                )
+                pdf_tbl.setStyle(TableStyle([
+                    ('BACKGROUND',    (0,0), (-1,0),
+                     colors.HexColor('#2E75B6')),
+                    ('TEXTCOLOR',     (0,0), (-1,0), colors.white),
+                    ('ROWBACKGROUNDS',(0,1), (-1,-1),
+                     [colors.HexColor('#DCE6F1'), colors.white]),
+                    ('GRID',   (0,0), (-1,-1), 0.5,
+                     colors.HexColor('#AAAAAA')),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('PADDING',(0,0), (-1,-1), 6),
+                ]))
+                story.append(Spacer(1, 8))
+                story.append(pdf_tbl)
+                story.append(Spacer(1, 12))
+            i += 1
+            continue
+
+        # ── Skip other environments ────────────────
+        if line.startswith('\\begin{') or line.startswith('\\end{'):
+            i += 1
+            continue
+
+        # ── Skip pure LaTeX commands ───────────────
+        if re.match(r'^\\[a-zA-Z]+\s*$', line):
+            i += 1
+            continue
+
+        # ── Regular paragraph ──────────────────────
+        flush_list(list_items)
+        list_items = []
+        text = strip_latex(line)
+        if text.strip():
+            try:
+                story.append(Paragraph(text, styles['body']))
+            except Exception:
+                story.append(Paragraph(
+                    re.sub('<[^>]+>', '', text),
+                    styles['body'],
+                ))
+        i += 1
+
+    flush_list(list_items)
+
+    # ── Build PDF ─────────────────────────────────
+    doc.build(story)
+    buffer.seek(0)
+    pdf_bytes = buffer.read()
+
+    pages = _count_pdf_pages(pdf_bytes)
+
+    return {
+        'bytes'   : pdf_bytes,
+        'engine'  : 'reportlab (fallback)',
+        'log'     : 'No LaTeX engine found — used pure Python fallback.',
+        'warnings': ['Math equations, custom packages not supported in fallback mode.'],
+        'errors'  : [],
+        'pages'   : pages,
+        'method'  : 'fallback',
+        'size_kb' : round(len(pdf_bytes) / 1024, 2),
+        'size_mb' : round(len(pdf_bytes) / (1024 * 1024), 2),
+    }
+
+
+def _count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Count pages in PDF bytes using pymupdf."""
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        pages = len(doc)
+        doc.close()
+        return pages
+    except Exception:
+        return 0
+
+
+def pdf_to_mobi(
+    source,
+    filename: str = "document.pdf",
+    title: str = "",
+    author: str = "",
+    password: str = None,
+) -> dict:
+    """
+    Convert PDF → MOBI (Kindle format).
+
+    Strategy:
+        1. ebook-convert (Calibre) → best quality
+        2. Fallback → extract text + ebooklib → basic MOBI
+
+    Args:
+        source   : uploaded file object OR raw bytes
+        filename : original filename
+        title    : book title          (default: filename)
+        author   : book author         (default: '')
+        password : PDF password        (default: None)
+
+    Returns:
+        {
+            'bytes'   : bytes,
+            'method'  : str,
+            'pages'   : int,
+            'size_kb' : float,
+        }
+    """
+    import shutil
+    import tempfile
+    import subprocess
+
+    # ── Read PDF ──────────────────────────────────
+    if hasattr(source, "read"):
+        pdf_bytes = source.read()
+        filename = getattr(source, "name", filename)
+    elif isinstance(source, bytes):
+        pdf_bytes = source
+    else:
+        raise ValueError("Invalid source.")
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file.")
+
+    title = title or filename.replace(".pdf", "").replace(".PDF", "")
+    author = author or "Unknown"
+
+    # ── Try Calibre ebook-convert ─────────────────
+    calibre = shutil.which("ebook-convert")
+    if calibre:
+        return _pdf_to_mobi_calibre(pdf_bytes, filename, title, author, calibre)
+
+    # ── Fallback: pymupdf + ebooklib ──────────────
+    return _pdf_to_mobi_python(pdf_bytes, filename, title, author, password)
+
+
+def _pdf_to_mobi_calibre(
+    pdf_bytes: bytes,
+    filename: str,
+    title: str,
+    author: str,
+    calibre: str,
+) -> dict:
+    """Convert PDF → MOBI using Calibre ebook-convert."""
+    import subprocess
+    import tempfile
+
+    base = filename.replace(".pdf", "").replace(".PDF", "")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = os.path.join(tmp, f"{base}.pdf")
+        mobi_path = os.path.join(tmp, f"{base}.mobi")
+
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+
+        subprocess.run(
+            [
+                calibre,
+                pdf_path,
+                mobi_path,
+                "--title",
+                title,
+                "--authors",
+                author,
+                "--output-profile",
+                "kindle",
+            ],
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+
+        with open(mobi_path, "rb") as f:
+            mobi_bytes = f.read()
+
+    return {
+        "bytes": mobi_bytes,
+        "method": "calibre",
+        "size_kb": round(len(mobi_bytes) / 1024, 2),
+        "size_mb": round(len(mobi_bytes) / (1024 * 1024), 2),
+    }
+
+
+def _pdf_to_mobi_python(
+    pdf_bytes: bytes,
+    filename: str,
+    title: str,
+    author: str,
+    password: str = None,
+) -> dict:
+    """
+    Pure Python fallback — PDF text → EPUB → MOBI bytes.
+    Uses pymupdf for extraction + ebooklib for packaging.
+    Note: Images not included in fallback mode.
+    """
+    import fitz
+    from ebooklib import epub
+
+    # ── Open PDF ──────────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    if doc.is_encrypted:
+        if not password:
+            raise ValueError("PDF is encrypted. Provide a password.")
+        if not doc.authenticate(password):
+            raise ValueError("Wrong password.")
+
+    total_pages = len(doc)
+
+    # ── Extract text per page ─────────────────────
+    pages_text = []
+    for page_num in range(total_pages):
+        page = doc[page_num]
+        text = page.get_text("text").strip()
+        if text:
+            pages_text.append(
+                {
+                    "page": page_num + 1,
+                    "text": text,
+                }
+            )
+    doc.close()
+
+    if not pages_text:
+        raise ValueError("No text found in PDF.")
+
+    # ── Build EPUB (MOBI-compatible) ──────────────
+    book = epub.EpubBook()
+    book.set_identifier(f"id_{filename}")
+    book.set_title(title)
+    book.set_language("en")
+    book.add_author(author)
+
+    # ── CSS ───────────────────────────────────────
+    css = epub.EpubItem(
+        uid="style",
+        file_name="style.css",
+        media_type="text/css",
+        content=b"""
+            body { font-family: Georgia, serif; margin: 2em; line-height: 1.6; }
+            h1   { color: #2E75B6; border-bottom: 1px solid #ccc; padding-bottom: 0.3em; }
+            p    { margin: 0.8em 0; text-align: justify; }
+            .page-break { page-break-after: always; }
+        """,
+    )
+    book.add_item(css)
+
+    # ── Chapters (one per page) ────────────────────
+    chapters = []
+    spine = ["nav"]
+
+    for p in pages_text:
+        chapter = epub.EpubHtml(
+            title=f'Page {p["page"]}',
+            file_name=f'page_{p["page"]}.xhtml',
+            lang="en",
+        )
+
+        # Convert plain text → HTML paragraphs
+        html_paras = "".join(
+            f"<p>{line.strip()}</p>" for line in p["text"].splitlines() if line.strip()
+        )
+
+        chapter.content = (
+            f'<html><head><link rel="stylesheet" href="style.css"/></head>'
+            f'<body><h1>Page {p["page"]}</h1>{html_paras}</body></html>'
+        ).encode("utf-8")
+
+        chapter.add_item(css)
+        book.add_item(chapter)
+        chapters.append(chapter)
+        spine.append(chapter)
+
+    # ── TOC + Spine ───────────────────────────────
+    book.toc = tuple(chapters)
+    book.spine = spine
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    # ── Write EPUB to bytes ───────────────────────
+    epub_buffer = io.BytesIO()
+    epub.write_epub(epub_buffer, book)
+    epub_buffer.seek(0)
+    epub_bytes = epub_buffer.read()
+
+    # ── Note: true MOBI needs Calibre ─────────────
+    # ebooklib cannot write native MOBI — we return EPUB
+    # which is compatible with most Kindle apps via Send to Kindle
+    return {
+        "bytes": epub_bytes,
+        "method": "python (epub — kindle compatible)",
+        "size_kb": round(len(epub_bytes) / 1024, 2),
+        "size_mb": round(len(epub_bytes) / (1024 * 1024), 2),
+        "pages": total_pages,
+        "note": (
+            "Calibre not found. Output is EPUB format which is "
+            "compatible with Kindle apps. "
+            "Install Calibre for native MOBI output."
+        ),
+    }

@@ -2580,3 +2580,484 @@ def markdown_to_word(
     doc.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
+
+def word_to_latex(
+    source,
+    filename: str = "document.docx",
+    document_class: str = "article",
+    font_size: int = 12,
+    paper_size: str = "a4paper",
+    include_packages: bool = True,
+    include_toc: bool = False,
+    include_title: bool = True,
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Convert Word (.docx) → LaTeX (.tex).
+
+    Handles:
+        - Headings      → \\section \\subsection \\subsubsection
+        - Paragraphs    → plain text paragraphs
+        - Bold          → \\textbf{}
+        - Italic        → \\textit{}
+        - Underline     → \\underline{}
+        - Strikethrough → \\sout{}
+        - Bullet lists  → itemize
+        - Numbered lists→ enumerate
+        - Tables        → tabular environment
+        - Code blocks   → verbatim / lstlisting
+        - Hyperlinks    → \\href{}
+        - Page breaks   → \\newpage
+        - Horizontal rules → \\hrule
+
+    Args:
+        source           : file object | raw bytes
+        filename         : original filename
+        document_class   : article | report | book    (default: article)
+        font_size        : 10 | 11 | 12              (default: 12)
+        paper_size       : a4paper | letterpaper     (default: a4paper)
+        include_packages : include usepackage lines  (default: True)
+        include_toc      : include tableofcontents   (default: False)
+        include_title    : include title block       (default: True)
+        encoding         : input encoding            (default: utf-8)
+
+    Returns:
+        {
+            'latex'       : str,
+            'headings'    : list,
+            'word_count'  : int,
+            'char_count'  : int,
+            'table_count' : int,
+            'list_count'  : int,
+        }
+    """
+    from docx import Document as DocxDocument
+    from docx.text.paragraph import Paragraph as DocxPara
+    from docx.table import Table as DocxTable
+    from docx.oxml.ns import qn
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        file_bytes = source.read()
+    elif isinstance(source, bytes):
+        file_bytes = source
+    else:
+        raise ValueError("source must be a file object or bytes.")
+
+    if not file_bytes:
+        raise ValueError("Empty file.")
+
+    # ── Open document ─────────────────────────────
+    try:
+        doc = DocxDocument(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise ValueError(f"Cannot open Word document: {e}")
+
+    # ── Validate ──────────────────────────────────
+    if document_class not in ("article", "report", "book"):
+        document_class = "article"
+    if font_size not in (10, 11, 12):
+        font_size = 12
+    if paper_size not in ("a4paper", "letterpaper", "legalpaper", "a3paper"):
+        paper_size = "a4paper"
+
+    # ── Tracking ──────────────────────────────────
+    headings = []
+    table_count = 0
+    list_count = 0
+
+    # ── LaTeX escape ──────────────────────────────
+    def escape_latex(text: str) -> str:
+        """Escape LaTeX special characters."""
+        replacements = [
+            ("\\", "\\textbackslash{}"),
+            ("&", "\\&"),
+            ("%", "\\%"),
+            ("$", "\\$"),
+            ("#", "\\#"),
+            ("^", "\\^{}"),
+            ("_", "\\_"),
+            ("{", "\\{"),
+            ("}", "\\}"),
+            ("~", "\\textasciitilde{}"),
+            ("<", "\\textless{}"),
+            (">", "\\textgreater{}"),
+            ("|", "\\textbar{}"),
+        ]
+        # Replace backslash first to avoid double escaping
+        text = text.replace("\\", "\\textbackslash{}")
+        for old, new in replacements[1:]:
+            text = text.replace(old, new)
+        return text
+
+    # ── Process runs → LaTeX ──────────────────────
+    def runs_to_latex(para) -> str:
+        parts = []
+        for run in para.runs:
+            text = escape_latex(run.text)
+            if not text:
+                continue
+
+            # Bold + Italic
+            if run.bold and run.italic:
+                text = f"\\textbf{{\\textit{{{text}}}}}"
+            elif run.bold:
+                text = f"\\textbf{{{text}}}"
+            elif run.italic:
+                text = f"\\textit{{{text}}}"
+
+            # Underline
+            if run.underline:
+                text = f"\\underline{{{text}}}"
+
+            # Strikethrough
+            if run.font.strike:
+                text = f"\\sout{{{text}}}"
+
+            # Monospace font
+            try:
+                font_name = run.font.name or ""
+                if "courier" in font_name.lower() or "mono" in font_name.lower():
+                    text = f"\\texttt{{{text}}}"
+            except Exception:
+                pass
+
+            # Hyperlink
+            try:
+                parent = run._element.getparent()
+                if parent.tag.endswith("}hyperlink"):
+                    rId = parent.get(qn("r:id"), "")
+                    href = ""
+                    try:
+                        href = doc.part.rels[rId].target_ref
+                    except Exception:
+                        pass
+                    if href:
+                        text = f"\\href{{{href}}}{{{text}}}"
+            except Exception:
+                pass
+
+            parts.append(text)
+
+        return "".join(parts)
+
+    # ── Process heading ────────────────────────────
+    def process_heading(para, level: int) -> str:
+        text = escape_latex(para.text.strip())
+        headings.append({"level": level, "text": para.text.strip()})
+
+        cmd_map = {
+            1: "\\section",
+            2: "\\subsection",
+            3: "\\subsubsection",
+            4: "\\paragraph",
+            5: "\\subparagraph",
+            6: "\\subparagraph",
+        }
+        # report/book use chapter for H1
+        if document_class in ("report", "book") and level == 1:
+            return f"\\chapter{{{text}}}"
+
+        cmd = cmd_map.get(level, "\\paragraph")
+        return f"{cmd}{{{text}}}"
+
+    # ── Process table ──────────────────────────────
+    def process_table(tbl) -> str:
+        nonlocal table_count
+        table_count += 1
+
+        rows_data = []
+        for row in tbl.rows:
+            row_data = []
+            for cell in row.cells:
+                cell_text = escape_latex(
+                    " ".join(p.text.strip() for p in cell.paragraphs)
+                )
+                row_data.append(cell_text)
+            rows_data.append(row_data)
+
+        if not rows_data:
+            return ""
+
+        num_cols = max(len(r) for r in rows_data)
+        rows_data = [r + [""] * (num_cols - len(r)) for r in rows_data]
+
+        col_spec = " | ".join(["l"] * num_cols)
+
+        latex_lines = [
+            "",
+            "\\begin{table}[h!]",
+            "\\centering",
+            f"\\begin{{tabular}}{{| {col_spec} |}}",
+            "\\hline",
+        ]
+
+        for r_idx, row in enumerate(rows_data):
+            row_str = " & ".join(
+                f"\\textbf{{{cell}}}" if r_idx == 0 else cell for cell in row
+            )
+            latex_lines.append(f"{row_str} \\\\")
+            if r_idx == 0:
+                latex_lines.append("\\hline")
+
+        latex_lines += [
+            "\\hline",
+            "\\end{tabular}",
+            f"\\caption{{Table {table_count}}}",
+            f"\\label{{tab:table{table_count}}}",
+            "\\end{table}",
+            "",
+        ]
+
+        return "\n".join(latex_lines)
+
+    # ── Process list ───────────────────────────────
+    def process_list_block(items: list) -> str:
+        """
+        items: list of (style_name, latex_text, level)
+        Returns LaTeX itemize/enumerate block.
+        """
+        nonlocal list_count
+        list_count += 1
+
+        if not items:
+            return ""
+
+        # Detect type from first item
+        first_style = items[0][0]
+        env = "enumerate" if "number" in first_style else "itemize"
+
+        lines = [f"\\begin{{{env}}}"]
+        for _, text, _ in items:
+            lines.append(f"  \\item {text}")
+        lines.append(f"\\end{{{env}}}")
+
+        return "\n".join(lines)
+
+    # ─────────────────────────────────────────────
+    # Process document body
+    # ─────────────────────────────────────────────
+    body_lines = []
+    list_buffer = []  # collect consecutive list items
+
+    def flush_list():
+        """Flush accumulated list items to body."""
+        if list_buffer:
+            body_lines.append(process_list_block(list_buffer))
+            list_buffer.clear()
+
+    for element in doc.element.body:
+        tag = element.tag.split("}")[-1]
+
+        if tag == "p":
+            para = DocxPara(element, doc)
+            text = para.text.strip()
+            style_name = (para.style.name or "Normal").lower()
+
+            # ── Page break ─────────────────────────
+            if any(
+                br.get(qn("w:type")) == "page"
+                for br in element.findall(".//" + qn("w:br"))
+            ):
+                flush_list()
+                body_lines.append("\\newpage")
+                continue
+
+            # ── Headings ───────────────────────────
+            if "heading 1" in style_name or style_name == "title":
+                flush_list()
+                body_lines.append(process_heading(para, 1))
+                body_lines.append("")
+                continue
+
+            if "heading 2" in style_name or style_name == "subtitle":
+                flush_list()
+                body_lines.append(process_heading(para, 2))
+                body_lines.append("")
+                continue
+
+            if "heading 3" in style_name:
+                flush_list()
+                body_lines.append(process_heading(para, 3))
+                body_lines.append("")
+                continue
+
+            if "heading 4" in style_name:
+                flush_list()
+                body_lines.append(process_heading(para, 4))
+                body_lines.append("")
+                continue
+
+            if "heading 5" in style_name:
+                flush_list()
+                body_lines.append(process_heading(para, 5))
+                body_lines.append("")
+                continue
+
+            if "heading 6" in style_name:
+                flush_list()
+                body_lines.append(process_heading(para, 6))
+                body_lines.append("")
+                continue
+
+            # ── Empty paragraph ────────────────────
+            if not text:
+                flush_list()
+                body_lines.append("")
+                continue
+
+            # ── List items ─────────────────────────
+            if "list bullet" in style_name or "list number" in style_name:
+                latex_text = runs_to_latex(para)
+                list_buffer.append((style_name, latex_text, 0))
+                continue
+
+            # ── Code / preformatted ────────────────
+            if "code" in style_name or "preformat" in style_name:
+                flush_list()
+                body_lines.append("\\begin{verbatim}")
+                body_lines.append(para.text)
+                body_lines.append("\\end{verbatim}")
+                body_lines.append("")
+                continue
+
+            # ── Blockquote ─────────────────────────
+            if "quote" in style_name or "block text" in style_name:
+                flush_list()
+                latex_text = runs_to_latex(para)
+                body_lines.append("\\begin{quote}")
+                body_lines.append(latex_text)
+                body_lines.append("\\end{quote}")
+                body_lines.append("")
+                continue
+
+            # ── Horizontal rule ────────────────────
+            if re.match(r"^[-_*]{3,}$", text.replace(" ", "")):
+                flush_list()
+                body_lines.append("")
+                body_lines.append("\\hrule")
+                body_lines.append("")
+                continue
+
+            # ── Regular paragraph ──────────────────
+            flush_list()
+            latex_text = runs_to_latex(para)
+            if latex_text.strip():
+                body_lines.append(latex_text)
+                body_lines.append("")
+
+        elif tag == "tbl":
+            flush_list()
+            try:
+                tbl = DocxTable(element, doc)
+                body_lines.append(process_table(tbl))
+            except Exception as e:
+                body_lines.append(f"% Table error: {e}")
+
+        elif tag == "sectPr":
+            pass
+
+    flush_list()
+
+    # ─────────────────────────────────────────────
+    # Build LaTeX document
+    # ─────────────────────────────────────────────
+    doc_title = filename.replace(".docx", "").replace(".doc", "")
+    latex_parts = []
+
+    # ── Preamble ──────────────────────────────────
+    latex_parts.append(
+        f"\\documentclass[{font_size}pt,{paper_size}]{{{document_class}}}"
+    )
+
+    if include_packages:
+        latex_parts.append("")
+        latex_parts.append("% ── Packages ─────────────────────────────")
+        latex_parts.append("\\usepackage[utf8]{inputenc}")
+        latex_parts.append("\\usepackage[T1]{fontenc}")
+        latex_parts.append("\\usepackage{lmodern}")
+        latex_parts.append("\\usepackage{amsmath}")
+        latex_parts.append("\\usepackage{amssymb}")
+        latex_parts.append("\\usepackage{graphicx}")
+        latex_parts.append("\\usepackage{hyperref}")
+        latex_parts.append("\\usepackage{booktabs}")
+        latex_parts.append("\\usepackage{array}")
+        latex_parts.append("\\usepackage{longtable}")
+        latex_parts.append("\\usepackage{xcolor}")
+        latex_parts.append("\\usepackage[normalem]{ulem}")  # for \\sout
+        latex_parts.append("\\usepackage{listings}")
+        latex_parts.append("\\usepackage{geometry}")
+        latex_parts.append(f"\\geometry{{{paper_size}, margin=1in}}")
+
+        # hyperref setup
+        latex_parts.append("")
+        latex_parts.append("% ── Hyperref setup ───────────────────────")
+        latex_parts.append("\\hypersetup{")
+        latex_parts.append("    colorlinks=true,")
+        latex_parts.append("    linkcolor=blue,")
+        latex_parts.append("    urlcolor=blue,")
+        latex_parts.append("    citecolor=green,")
+        latex_parts.append("}")
+
+        # lstlisting setup
+        latex_parts.append("")
+        latex_parts.append("% ── Code listing setup ───────────────────")
+        latex_parts.append("\\lstset{")
+        latex_parts.append("    basicstyle=\\ttfamily\\small,")
+        latex_parts.append("    breaklines=true,")
+        latex_parts.append("    frame=single,")
+        latex_parts.append("    backgroundcolor=\\color{gray!10},")
+        latex_parts.append("    keywordstyle=\\color{blue},")
+        latex_parts.append("    commentstyle=\\color{green!60!black},")
+        latex_parts.append("    stringstyle=\\color{red},")
+        latex_parts.append("}")
+
+    # ── Title block ───────────────────────────────
+    if include_title:
+        latex_parts.append("")
+        latex_parts.append("% ── Document info ────────────────────────")
+        latex_parts.append(f"\\title{{{escape_latex(doc_title)}}}")
+        latex_parts.append("\\author{}")
+        latex_parts.append("\\date{\\today}")
+
+    # ── Begin document ────────────────────────────
+    latex_parts.append("")
+    latex_parts.append("% ── Begin document ───────────────────────")
+    latex_parts.append("\\begin{document}")
+
+    if include_title:
+        latex_parts.append("")
+        latex_parts.append("\\maketitle")
+
+    if include_toc:
+        latex_parts.append("")
+        latex_parts.append("\\tableofcontents")
+        latex_parts.append("\\newpage")
+
+    # ── Body ──────────────────────────────────────
+    latex_parts.append("")
+    latex_parts.extend(body_lines)
+
+    # ── End document ──────────────────────────────
+    latex_parts.append("")
+    latex_parts.append("\\end{document}")
+
+    # ── Join ──────────────────────────────────────
+    import re as _re
+
+    latex = "\n".join(latex_parts)
+    latex = _re.sub(r"\n{3,}", "\n\n", latex)
+
+    word_count = len(latex.split())
+    char_count = len(latex)
+
+    return {
+        "latex": latex,
+        "headings": headings,
+        "word_count": word_count,
+        "char_count": char_count,
+        "table_count": table_count,
+        "list_count": list_count,
+    }

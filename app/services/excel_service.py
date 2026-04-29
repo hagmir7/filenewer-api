@@ -908,3 +908,566 @@ def markdown_to_excel(
     wb.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
+
+def sql_to_excel(
+    source,
+    filename: str = "query.sql",
+    encoding: str = "utf-8",
+    include_stats: bool = True,
+    include_schema: bool = True,
+) -> bytes:
+    """
+    Parse SQL (DDL + INSERT statements) → Excel (.xlsx).
+
+    Handles:
+        - CREATE TABLE  → schema sheet
+        - INSERT INTO   → data sheet per table
+        - Multiple tables → one sheet per table
+        - Column types   → type detection
+        - Statistics     → summary sheet
+
+    Args:
+        source         : file object | raw SQL string | bytes
+        filename       : original filename
+        encoding       : input encoding               (default: utf-8)
+        include_stats  : include summary sheet        (default: True)
+        include_schema : include schema sheet         (default: True)
+
+    Returns:
+        Raw bytes of the generated .xlsx file
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    import re
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+    elif isinstance(source, str):
+        raw = source
+    else:
+        raise ValueError("source must be a string, bytes, or file object.")
+
+    if not raw.strip():
+        raise ValueError("Empty input.")
+
+    # ── Style constants ────────────────────────────
+    BLUE = "2E75B6"
+    LIGHT_BLUE = "DCE6F1"
+    DARK_BLUE = "1F4E79"
+    GREEN = "70AD47"
+    ORANGE = "ED7D31"
+    PURPLE = "7030A0"
+    WHITE = "FFFFFF"
+    GREY = "F2F2F2"
+
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    def header_style(cell, color=BLUE):
+        cell.font = Font(bold=True, color=WHITE, size=11)
+        cell.fill = PatternFill(fill_type="solid", fgColor=color)
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+        cell.border = thin_border
+
+    def data_style(cell, even_row=False, bold=False, align="left"):
+        cell.fill = PatternFill(
+            fill_type="solid",
+            fgColor=LIGHT_BLUE if even_row else WHITE,
+        )
+        cell.font = Font(bold=bold, size=10)
+        cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+        cell.border = thin_border
+
+    # ── Safe auto-fit ──────────────────────────────
+    def safe_auto_fit(ws, min_w=8, max_w=60):
+        from openpyxl.cell.cell import MergedCell
+
+        col_widths = {}
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
+                try:
+                    col_letter = cell.column_letter
+                except AttributeError:
+                    continue
+                if not col_letter:
+                    continue
+                length = len(str(cell.value)) if cell.value is not None else 0
+                col_widths[col_letter] = max(
+                    col_widths.get(col_letter, min_w),
+                    min(length + 4, max_w),
+                )
+        for letter, width in col_widths.items():
+            ws.column_dimensions[letter].width = width
+
+    # ─────────────────────────────────────────────
+    # Parse SQL
+    # ─────────────────────────────────────────────
+
+    # ── Remove comments ────────────────────────────
+    sql = re.sub(r"--[^\n]*", "", raw)  # single line
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)  # block
+    sql = re.sub(r"\s+", " ", sql).strip()
+
+    # ── Parse CREATE TABLE ────────────────────────
+    schemas = {}  # { table_name: [ {col, type, constraints} ] }
+
+    create_pattern = re.compile(
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+        r'[`"\[]?(\w+)[`"\]]?\s*\((.+?)\)\s*;',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for match in create_pattern.finditer(sql):
+        table_name = match.group(1).strip()
+        cols_raw = match.group(2).strip()
+
+        columns = []
+        for col_def in _split_columns(cols_raw):
+            col_def = col_def.strip()
+            if not col_def:
+                continue
+
+            # Skip constraints
+            upper = col_def.upper()
+            if any(
+                upper.startswith(k)
+                for k in (
+                    "PRIMARY",
+                    "FOREIGN",
+                    "UNIQUE",
+                    "CHECK",
+                    "INDEX",
+                    "KEY",
+                    "CONSTRAINT",
+                )
+            ):
+                continue
+
+            # Parse column name and type
+            parts = col_def.split()
+            if len(parts) >= 2:
+                col_name = parts[0].strip('`"\[]')
+                col_type = parts[1].strip('`"\[],()')
+                constraints = " ".join(parts[2:]).upper()
+                columns.append(
+                    {
+                        "name": col_name,
+                        "type": col_type,
+                        "nullable": "NOT NULL" not in constraints,
+                        "primary_key": "PRIMARY" in constraints,
+                        "default": _extract_default(col_def),
+                        "constraints": constraints,
+                    }
+                )
+
+        if columns:
+            schemas[table_name.upper()] = columns
+
+    # ── Parse INSERT INTO ──────────────────────────
+    tables = {}  # { table_name: { 'columns': [], 'rows': [] } }
+
+    insert_pattern = re.compile(
+        r'INSERT\s+INTO\s+[`"\[]?(\w+)[`"\]]?\s*'
+        r"(?:\(([^)]+)\))?\s*VALUES\s*(.+?)(?=INSERT\s+INTO|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for match in insert_pattern.finditer(sql):
+        table_name = match.group(1).strip().upper()
+        cols_str = match.group(2)
+        values_str = match.group(3).strip()
+
+        # Parse column names
+        if cols_str:
+            columns = [c.strip().strip('`"\[]') for c in cols_str.split(",")]
+        else:
+            # Use schema columns if available
+            columns = [c["name"] for c in schemas.get(table_name, [])]
+
+        if table_name not in tables:
+            tables[table_name] = {"columns": columns, "rows": []}
+        elif not tables[table_name]["columns"] and columns:
+            tables[table_name]["columns"] = columns
+
+        # Parse VALUES
+        rows = _parse_values(values_str)
+        tables[table_name]["rows"].extend(rows)
+
+    # ─────────────────────────────────────────────
+    # Build Excel Workbook
+    # ─────────────────────────────────────────────
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ────────────────────────────────────────────────
+    # Sheet: Summary
+    # ────────────────────────────────────────────────
+    if include_stats:
+        ws_sum = wb.create_sheet("Summary")
+        ws_sum.sheet_properties.tabColor = BLUE
+
+        ws_sum["A1"] = f"SQL File: {filename}"
+        ws_sum["A1"].font = Font(bold=True, size=14, color=DARK_BLUE)
+        ws_sum.merge_cells("A1:D1")
+        ws_sum.row_dimensions[1].height = 30
+
+        stats = [
+            ("Property", "Value", "Details", ""),
+            ("Filename", filename, "", ""),
+            ("Tables Found", len(tables), f'{", ".join(tables.keys()) or "none"}', ""),
+            (
+                "Total Rows",
+                sum(len(t["rows"]) for t in tables.values()),
+                "across all tables",
+                "",
+            ),
+            (
+                "Schemas Parsed",
+                len(schemas),
+                f'{", ".join(schemas.keys()) or "none"}',
+                "",
+            ),
+            ("SQL Size", f"{round(len(raw)/1024, 2)} KB", "", ""),
+        ]
+
+        for r_idx, row_data in enumerate(stats, start=2):
+            for c_idx, value in enumerate(row_data, start=1):
+                cell = ws_sum.cell(row=r_idx, column=c_idx, value=value)
+                if r_idx == 2:
+                    header_style(cell)
+                else:
+                    data_style(cell, even_row=(r_idx % 2 == 0))
+
+        safe_auto_fit(ws_sum)
+        ws_sum.freeze_panes = "A3"
+
+    # ────────────────────────────────────────────────
+    # Sheet: Schema
+    # ────────────────────────────────────────────────
+    if include_schema and schemas:
+        ws_schema = wb.create_sheet("Schema")
+        ws_schema.sheet_properties.tabColor = PURPLE
+
+        headers = ["Table", "Column", "Type", "Nullable", "Primary Key", "Default"]
+        for c_idx, h in enumerate(headers, start=1):
+            header_style(
+                ws_schema.cell(row=1, column=c_idx, value=h),
+                color=PURPLE,
+            )
+        ws_schema.freeze_panes = "A2"
+
+        r_idx = 2
+        for table_name, columns in schemas.items():
+            for col in columns:
+                even = r_idx % 2 == 0
+
+                # Table name
+                tc = ws_schema.cell(row=r_idx, column=1, value=table_name)
+                tc.font = Font(bold=True, size=10, color=DARK_BLUE)
+                tc.fill = PatternFill(
+                    fill_type="solid",
+                    fgColor=LIGHT_BLUE if even else WHITE,
+                )
+                tc.alignment = Alignment(vertical="center")
+                tc.border = thin_border
+
+                data_style(
+                    ws_schema.cell(row=r_idx, column=2, value=col["name"]),
+                    even_row=even,
+                    bold=col["primary_key"],
+                )
+
+                type_cell = ws_schema.cell(row=r_idx, column=3, value=col["type"])
+                type_cell.font = Font(
+                    name="Courier New",
+                    size=9,
+                    color="C0392B",
+                )
+                type_cell.fill = PatternFill(
+                    fill_type="solid",
+                    fgColor=LIGHT_BLUE if even else WHITE,
+                )
+                type_cell.alignment = Alignment(vertical="center")
+                type_cell.border = thin_border
+
+                # Nullable
+                null_val = "✓ Yes" if col["nullable"] else "✗ No"
+                null_cell = ws_schema.cell(row=r_idx, column=4, value=null_val)
+                null_cell.font = Font(
+                    bold=True,
+                    size=10,
+                    color="70AD47" if col["nullable"] else "C0392B",
+                )
+                null_cell.fill = PatternFill(
+                    fill_type="solid",
+                    fgColor=LIGHT_BLUE if even else WHITE,
+                )
+                null_cell.alignment = Alignment(horizontal="center", vertical="center")
+                null_cell.border = thin_border
+
+                # Primary Key
+                pk_val = "🔑 Yes" if col["primary_key"] else ""
+                pk_cell = ws_schema.cell(row=r_idx, column=5, value=pk_val)
+                data_style(pk_cell, even_row=even)
+                pk_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                data_style(
+                    ws_schema.cell(
+                        row=r_idx,
+                        column=6,
+                        value=col["default"] or "",
+                    ),
+                    even_row=even,
+                )
+
+                r_idx += 1
+
+        safe_auto_fit(ws_schema)
+
+    # ────────────────────────────────────────────────
+    # Sheets: One per table (INSERT data)
+    # ────────────────────────────────────────────────
+    for table_name, table_data in tables.items():
+        cols = table_data["columns"]
+        rows = table_data["rows"]
+
+        safe_label = table_name[:31]
+        existing = [ws.title for ws in wb.worksheets]
+        if safe_label in existing:
+            safe_label = safe_label[:28] + "_2"
+
+        ws_tbl = wb.create_sheet(safe_label)
+        ws_tbl.sheet_properties.tabColor = GREEN
+
+        # ── Title row ──────────────────────────────
+        title_cell = ws_tbl.cell(
+            row=1,
+            column=1,
+            value=f"{table_name} ({len(rows)} rows)",
+        )
+        title_cell.font = Font(bold=True, size=13, color=DARK_BLUE)
+        if cols:
+            ws_tbl.merge_cells(
+                start_row=1,
+                end_row=1,
+                start_column=1,
+                end_column=max(len(cols), 1),
+            )
+        ws_tbl.row_dimensions[1].height = 25
+
+        # ── Column headers ─────────────────────────
+        if not cols and rows:
+            cols = [f"col_{i+1}" for i in range(len(rows[0]))]
+
+        # Add schema type hint to header
+        schema_cols = {
+            c["name"].upper(): c["type"] for c in schemas.get(table_name, [])
+        }
+
+        for c_idx, col in enumerate(cols, start=1):
+            col_type = schema_cols.get(col.upper(), "")
+            header_label = f"{col}\n({col_type})" if col_type else col
+            cell = ws_tbl.cell(row=2, column=c_idx, value=header_label)
+            header_style(cell)
+
+        ws_tbl.row_dimensions[2].height = 30
+        ws_tbl.freeze_panes = "A3"
+
+        # ── Data rows ──────────────────────────────
+        for r_idx, row in enumerate(rows, start=3):
+            even = r_idx % 2 == 0
+            for c_idx, val in enumerate(row, start=1):
+                if c_idx > len(cols):
+                    break
+
+                # Type coercion
+                typed_val = _coerce_sql_value(val)
+
+                cell = ws_tbl.cell(row=r_idx, column=c_idx, value=typed_val)
+
+                align = "right" if isinstance(typed_val, (int, float)) else "left"
+                data_style(cell, even_row=even, align=align)
+
+        # ── Totals row for numeric columns ─────────
+        if rows:
+            total_row = len(rows) + 3
+
+            tot0 = ws_tbl.cell(row=total_row, column=1, value="TOTAL")
+            tot0.font = Font(bold=True, color=WHITE)
+            tot0.fill = PatternFill(fill_type="solid", fgColor=BLUE)
+            tot0.alignment = Alignment(horizontal="center")
+            tot0.border = thin_border
+
+            for c_idx in range(1, len(cols)):
+                numeric_vals = []
+                for row in rows:
+                    if c_idx < len(row):
+                        v = _coerce_sql_value(row[c_idx])
+                        if isinstance(v, (int, float)):
+                            numeric_vals.append(v)
+
+                tc = ws_tbl.cell(row=total_row, column=c_idx + 1)
+                if numeric_vals:
+                    tc.value = sum(numeric_vals)
+                    tc.font = Font(bold=True, color=WHITE)
+                    tc.alignment = Alignment(horizontal="right", vertical="center")
+                tc.fill = PatternFill(fill_type="solid", fgColor=BLUE)
+                tc.border = thin_border
+
+        safe_auto_fit(ws_tbl)
+
+    # ── Fallback empty ─────────────────────────────
+    if not wb.worksheets:
+        ws = wb.create_sheet("Result")
+        ws["A1"] = "No CREATE TABLE or INSERT INTO statements found in SQL."
+        ws["A1"].font = Font(size=11, color="FF0000")
+
+    # ── Serialize ─────────────────────────────────
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def _split_columns(cols_raw: str) -> list:
+    """
+    Split CREATE TABLE column definitions respecting parentheses.
+    e.g. col1 INT, col2 VARCHAR(255), CHECK(col1 > 0)
+    """
+    parts = []
+    depth = 0
+    current = ""
+
+    for ch in cols_raw:
+        if ch == "(":
+            depth += 1
+            current += ch
+        elif ch == ")":
+            depth -= 1
+            current += ch
+        elif ch == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += ch
+
+    if current.strip():
+        parts.append(current.strip())
+
+    return parts
+
+
+def _extract_default(col_def: str) -> str:
+    """Extract DEFAULT value from column definition."""
+    import re
+
+    m = re.search(r"DEFAULT\s+([^\s,]+)", col_def, re.IGNORECASE)
+    return m.group(1).strip("'\"") if m else ""
+
+
+def _parse_values(values_str: str) -> list:
+    """
+    Parse VALUES clause into list of rows.
+    Handles: (1,'text',NULL), (2,'it''s',3.14)
+    """
+    import re
+
+    rows = []
+    # Find all value groups (...), (...), ...
+    groups = re.findall(r"\(([^)]*(?:\([^)]*\)[^)]*)*)\)", values_str)
+
+    for group in groups:
+        values = _split_values(group)
+        rows.append(values)
+
+    return rows
+
+
+def _split_values(values_str: str) -> list:
+    """Split a VALUES group respecting quoted strings."""
+    parts = []
+    current = ""
+    in_str = False
+    quote = None
+
+    i = 0
+    while i < len(values_str):
+        ch = values_str[i]
+
+        if not in_str and ch in ("'", '"'):
+            in_str = True
+            quote = ch
+            current += ch
+        elif in_str and ch == quote:
+            # Check for escaped quote ''
+            if i + 1 < len(values_str) and values_str[i + 1] == quote:
+                current += ch + quote
+                i += 2
+                continue
+            else:
+                in_str = False
+                current += ch
+        elif not in_str and ch == ",":
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += ch
+
+        i += 1
+
+    if current.strip():
+        parts.append(current.strip())
+
+    return parts
+
+
+def _coerce_sql_value(val: str):
+    """Convert SQL string value to Python type."""
+    if val is None:
+        return None
+
+    val = str(val).strip()
+
+    # NULL
+    if val.upper() == "NULL":
+        return None
+
+    # Boolean
+    if val.upper() in ("TRUE", "1"):
+        return True
+    if val.upper() in ("FALSE", "0") and val.upper() in ("TRUE", "FALSE"):
+        return False
+
+    # Strip quotes
+    if (val.startswith("'") and val.endswith("'")) or (
+        val.startswith('"') and val.endswith('"')
+    ):
+        return val[1:-1].replace("''", "'")
+
+    # Integer
+    try:
+        return int(val)
+    except ValueError:
+        pass
+
+    # Float
+    try:
+        return float(val)
+    except ValueError:
+        pass
+
+    return val

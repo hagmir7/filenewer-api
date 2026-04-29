@@ -14,6 +14,8 @@ from ..views import (
     MergePDFView,
     SplitPDFView,
     WordToPDFView,
+    LaTeXToPDFView,
+    PDFToMOBIView,
 )
 
 urlpatterns = [
@@ -31,4 +33,6 @@ urlpatterns = [
     path("tools/pdf-merge", MergePDFView.as_view(), name="pdf-merge"),
     path("tools/pdf-split", SplitPDFView.as_view(), name="pdf-split"),
     path("tools/word-to-pdf", WordToPDFView.as_view(), name="word-to-pdf"),
+    path("tools/latex-to-pdf", LaTeXToPDFView.as_view(), name="latex-to-pdf"),
+    path("tools/pdf-to-mobi", PDFToMOBIView.as_view(), name="pdf-to-mobi"),
 ]

@@ -27,6 +27,9 @@ from .services.pdf_service import (
     watermark_pdf,
     merge_pdfs,
     split_pdf,
+    latex_to_pdf,
+    pdf_to_mobi
+
 )
 from .services.csv_service import (
     sanitize_name,
@@ -48,6 +51,7 @@ from .services.excel_service import (
     excel_to_csv,
     excel_to_markdown,
     markdown_to_excel,
+    sql_to_excel
 )
 from .services.word_service import (
     word_to_pdf,
@@ -58,6 +62,7 @@ from .services.word_service import (
     markdown_to_word,
     merge_docx,
     split_docx,
+    word_to_latex
 )
 from .services.base64_service import (
     base64_encode,
@@ -5432,7 +5437,6 @@ class JSONTextToYAMLView(APIView):
         )
 
 
-
 class YAMLFileToJSONView(APIView):
     """
     POST /api/convert/yaml-file-to-json/
@@ -5642,3 +5646,471 @@ class YAMLTextToJSONView(APIView):
                 "indent": result["indent"],
             }
         )
+
+
+class SQLFileToExcelView(APIView):
+    """
+    POST /api/convert/sql-file-to-excel/
+    Upload a .sql file → returns Excel.
+
+    Form fields:
+        file           : SQL file                          (required)
+        encoding       : utf-8 | ascii | latin-1           (default: utf-8)
+        include_stats  : true | false                      (default: true)
+        include_schema : true | false                      (default: true)
+        output_filename: custom output filename            (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        encoding = request.data.get("encoding", "utf-8")
+        include_stats = request.data.get("include_stats", "true")
+        include_schema = request.data.get("include_schema", "true")
+        output_filename = request.data.get("output_filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith(".sql"):
+            return Response(
+                {"error": "Only .sql files are accepted."},
+                status=400,
+            )
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_stats = to_bool(include_stats)
+        include_schema = to_bool(include_schema)
+
+        # ── Output filename ───────────────────────
+        if not output_filename:
+            output_filename = file.name.replace(".sql", ".xlsx").replace(
+                ".SQL", ".xlsx"
+            )
+        if not output_filename.endswith(".xlsx"):
+            output_filename += ".xlsx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            xlsx_bytes = sql_to_excel(
+                file,
+                filename=file.name,
+                encoding=encoding,
+                include_stats=include_stats,
+                include_schema=include_schema,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return .xlsx download ──────────────────
+        response = HttpResponse(
+            xlsx_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument" ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(xlsx_bytes)
+        return response
+
+
+class SQLTextToExcelView(APIView):
+    """
+    POST /api/convert/sql-text-to-excel/
+    Send raw SQL string → returns Excel.
+
+    JSON body:
+        {
+            "sql"           : "CREATE TABLE ... INSERT INTO ...",
+            "filename"      : "query.sql",
+            "include_stats" : true,
+            "include_schema": true,
+            "output_filename": "output.xlsx"
+        }
+    """
+
+    parser_classes = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        sql_input = request.data.get("sql")
+        filename = request.data.get("filename", "query.sql")
+        include_stats = request.data.get("include_stats", True)
+        include_schema = request.data.get("include_schema", True)
+        output_filename = request.data.get("output_filename", "output.xlsx")
+
+        # ── Validate ──────────────────────────────
+        if not sql_input:
+            return Response(
+                {"error": '"sql" field is required.'},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_stats = to_bool(include_stats)
+        include_schema = to_bool(include_schema)
+
+        if not output_filename.endswith(".xlsx"):
+            output_filename += ".xlsx"
+
+        # ── Convert ───────────────────────────────
+        try:
+            xlsx_bytes = sql_to_excel(
+                str(sql_input),
+                filename=str(filename),
+                include_stats=include_stats,
+                include_schema=include_schema,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Return .xlsx download ──────────────────
+        response = HttpResponse(
+            xlsx_bytes,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument" ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(xlsx_bytes)
+        return response
+
+
+class WordToLaTeXView(APIView):
+    """
+    POST /api/convert/word-to-latex/
+    Upload a Word file (.docx) → returns LaTeX (.tex).
+
+    Form fields:
+        file              : Word file (.docx / .doc)       (required)
+        document_class    : article | report | book        (default: article)
+        font_size         : 10 | 11 | 12                   (default: 12)
+        paper_size        : a4paper | letterpaper          (default: a4paper)
+        include_packages  : true | false                   (default: true)
+        include_toc       : true | false                   (default: false)
+        include_title     : true | false                   (default: true)
+        encoding          : utf-8 | ascii | latin-1        (default: utf-8)
+        output            : json | file                    (default: json)
+        output_filename   : custom output filename         (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        document_class = request.data.get("document_class", "article")
+        font_size = request.data.get("font_size", "12")
+        paper_size = request.data.get("paper_size", "a4paper")
+        include_packages = request.data.get("include_packages", "true")
+        include_toc = request.data.get("include_toc", "false")
+        include_title = request.data.get("include_title", "true")
+        encoding = request.data.get("encoding", "utf-8")
+        output = request.data.get("output", "json")
+        output_filename = request.data.get("output_filename", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith((".docx", ".doc")):
+            return Response(
+                {"error": "Only .docx or .doc files are accepted."},
+                status=400,
+            )
+        if document_class not in ("article", "report", "book"):
+            return Response(
+                {"error": "document_class must be: article, report, or book."},
+                status=400,
+            )
+        if paper_size not in ("a4paper", "letterpaper", "legalpaper", "a3paper"):
+            return Response(
+                {
+                    "error": "paper_size must be: a4paper, letterpaper, legalpaper, or a3paper."
+                },
+                status=400,
+            )
+        if output not in ("json", "file"):
+            return Response(
+                {"error": "output must be: json or file."},
+                status=400,
+            )
+
+        # ── Parse font_size ───────────────────────
+        try:
+            font_size = int(font_size)
+            if font_size not in (10, 11, 12):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "font_size must be: 10, 11, or 12."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        include_packages = to_bool(include_packages)
+        include_toc = to_bool(include_toc)
+        include_title = to_bool(include_title)
+
+        # ── Output filename ───────────────────────
+        if not output_filename:
+            output_filename = (
+                file.name.replace(".docx", ".tex")
+                .replace(".DOCX", ".tex")
+                .replace(".doc", ".tex")
+                .replace(".DOC", ".tex")
+            )
+        if not output_filename.endswith(".tex"):
+            output_filename += ".tex"
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = word_to_latex(
+                file,
+                filename=file.name,
+                document_class=document_class,
+                font_size=font_size,
+                paper_size=paper_size,
+                include_packages=include_packages,
+                include_toc=include_toc,
+                include_title=include_title,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output: file download ──────────────────
+        if output == "file":
+            response = HttpResponse(
+                result["latex"].encode(encoding),
+                content_type="application/x-latex",
+            )
+            response["Content-Disposition"] = (
+                f'attachment; filename="{output_filename}"'
+            )
+            response["Content-Length"] = len(result["latex"].encode(encoding))
+            response["X-Word-Count"] = result["word_count"]
+            response["X-Char-Count"] = result["char_count"]
+            response["X-Table-Count"] = result["table_count"]
+            response["X-Heading-Count"] = len(result["headings"])
+            return response
+
+        # ── Output: JSON response (default) ────────
+        return Response(
+            {
+                "latex": result["latex"],
+                "headings": result["headings"],
+                "word_count": result["word_count"],
+                "char_count": result["char_count"],
+                "table_count": result["table_count"],
+                "list_count": result["list_count"],
+            }
+        )
+
+
+class LaTeXToPDFView(APIView):
+    """
+    POST /api/convert/latex-to-pdf/
+    Upload .tex file or send raw LaTeX → returns PDF.
+
+    Form fields (file upload):
+        file       : .tex file                             (required)
+        engine     : pdflatex | xelatex | lualatex        (default: pdflatex)
+        runs       : compilation runs 1-3                  (default: 2)
+        encoding   : utf-8 | ascii | latin-1              (default: utf-8)
+
+    JSON body (raw LaTeX):
+        {
+            "latex"   : "\\documentclass{article}...",
+            "filename": "document.tex",
+            "engine"  : "pdflatex",
+            "runs"    : 2
+        }
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file", None)
+        latex_text = request.data.get("latex", None)
+        filename = request.data.get("filename", "document.tex")
+        engine = request.data.get("engine", "pdflatex")
+        runs = request.data.get("runs", "2")
+        encoding = request.data.get("encoding", "utf-8")
+
+        # ── Validate ──────────────────────────────
+        if not file and not latex_text:
+            return Response(
+                {"error": 'Provide either "file" (.tex) or "latex" (raw string).'},
+                status=400,
+            )
+
+        if file and not file.name.lower().endswith((".tex", ".latex")):
+            return Response(
+                {"error": "Only .tex or .latex files are accepted."},
+                status=400,
+            )
+
+        if engine not in ("pdflatex", "xelatex", "lualatex"):
+            return Response(
+                {"error": "engine must be: pdflatex, xelatex, or lualatex."},
+                status=400,
+            )
+
+        if encoding not in ("utf-8", "ascii", "latin-1", "utf-16"):
+            return Response(
+                {"error": "encoding must be: utf-8, ascii, latin-1, or utf-16."},
+                status=400,
+            )
+
+        # ── Parse runs ────────────────────────────
+        try:
+            runs = int(runs)
+            if not (1 <= runs <= 3):
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "runs must be an integer between 1 and 3."},
+                status=400,
+            )
+
+        # ── Source + filename ──────────────────────
+        source = file if file else str(latex_text)
+        src_name = file.name if file else str(filename)
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = latex_to_pdf(
+                source,
+                filename=src_name,
+                engine=engine,
+                runs=runs,
+                encoding=encoding,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except RuntimeError as e:
+            return Response({"error": str(e)}, status=422)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Output filename ───────────────────────
+        pdf_filename = (
+            src_name.replace(".tex", ".pdf")
+            .replace(".latex", ".pdf")
+            .replace(".TEX", ".pdf")
+        )
+
+        # ── Return PDF download ────────────────────
+        response = HttpResponse(
+            result["bytes"],
+            content_type="application/pdf",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{pdf_filename}"'
+        response["Content-Length"] = len(result["bytes"])
+        response["X-Engine"] = result["engine"]
+        response["X-Method"] = result["method"]
+        response["X-Pages"] = result["pages"]
+        response["X-Size-KB"] = result["size_kb"]
+        response["X-Warnings"] = len(result["warnings"])
+        response["X-Errors"] = len(result["errors"])
+        return response
+
+
+class PDFToMOBIView(APIView):
+    """
+    POST /api/convert/pdf-to-mobi/
+    Upload a PDF → returns MOBI (or EPUB if Calibre not installed).
+
+    Form fields:
+        file     : PDF file               (required)
+        title    : book title             (optional)
+        author   : book author            (optional)
+        password : PDF password           (optional)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        title = request.data.get("title", "")
+        author = request.data.get("author", "")
+        password = request.data.get("password", None)
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith(".pdf"):
+            return Response(
+                {"error": "Only .pdf files are accepted."},
+                status=400,
+            )
+
+        # ── Convert ───────────────────────────────
+        try:
+            result = pdf_to_mobi(
+                file,
+                filename=file.name,
+                title=str(title),
+                author=str(author),
+                password=password,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Determine output format ────────────────
+        is_mobi = result["method"] == "calibre"
+        ext = ".mobi" if is_mobi else ".epub"
+        ct = "application/x-mobipocket-ebook" if is_mobi else "application/epub+zip"
+        out_name = file.name.replace(".pdf", ext).replace(".PDF", ext)
+
+        response = HttpResponse(result["bytes"], content_type=ct)
+        response["Content-Disposition"] = f'attachment; filename="{out_name}"'
+        response["Content-Length"] = len(result["bytes"])
+        response["X-Method"] = result["method"]
+        response["X-Size-KB"] = result["size_kb"]
+
+        if "note" in result:
+            response["X-Note"] = result["note"]
+
+        return response

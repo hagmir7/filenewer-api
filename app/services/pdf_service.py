@@ -3223,6 +3223,8 @@ img {
     }
 
 
+
+
 def ipynb_to_pdf(
     source,
     filename: str = "notebook.ipynb",
@@ -3232,31 +3234,35 @@ def ipynb_to_pdf(
     include_output: bool = True,
     include_markdown: bool = True,
     theme: str = "light",
+    page_size: str = "A4",
 ) -> dict:
     """
     Convert Jupyter Notebook (.ipynb) → PDF.
 
     Strategy:
-        1. Parse .ipynb JSON structure
-        2. Walk cells: markdown → rendered HTML, code → styled block
-        3. Build full HTML document with embedded CSS
-        4. Convert HTML → PDF via weasyprint
+        1. Parse .ipynb with nbformat
+        2. Export to HTML using nbconvert HTMLExporter
+        3. Strip complex nbconvert CSS (incompatible with xhtml2pdf)
+        4. Inject clean, minimal print-safe CSS + cover block
+        5. Render HTML → PDF via xhtml2pdf (no native lib dependencies)
 
     Args:
         source           : file object OR raw bytes
         filename         : original filename
         title            : document title        (default: filename)
-        author           : author name           (default: '')
+        author           : author name           (default: notebook metadata)
         include_input    : render code inputs     (default: True)
         include_output   : render cell outputs    (default: True)
         include_markdown : render markdown cells  (default: True)
         theme            : 'light' or 'dark'      (default: 'light')
+        page_size        : 'A4', 'Letter', 'A3'  (default: 'A4')
 
     Returns:
         {
             'bytes'         : bytes,
             'title'         : str,
             'author'        : str,
+            'language'      : str,
             'total_cells'   : int,
             'code_cells'    : int,
             'markdown_cells': int,
@@ -3264,19 +3270,21 @@ def ipynb_to_pdf(
             'size_mb'       : float,
         }
     """
-    import json
+    import io
     import re
-    from weasyprint import HTML as WeasyprintHTML
+    import nbformat
+    from nbconvert import HTMLExporter
+    from xhtml2pdf import pisa
 
     # ── Read source ───────────────────────────────
     if hasattr(source, "read"):
         raw = source.read()
         if not title:
             title = getattr(source, "name", filename)
-    elif isinstance(source, bytes):
+    elif isinstance(source, (bytes, str)):
         raw = source
     else:
-        raise ValueError("source must be a file object or bytes.")
+        raise ValueError("source must be a file object, bytes, or str.")
 
     if not raw:
         raise ValueError("Empty file.")
@@ -3284,354 +3292,174 @@ def ipynb_to_pdf(
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
 
-    try:
-        nb = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid .ipynb JSON: {e}")
-
     if not title:
         title = filename.replace(".ipynb", "").replace(".IPYNB", "")
 
-    # ── Extract notebook metadata ──────────────────
+    # ── Validate options ──────────────────────────
+    if theme not in ("light", "dark"):
+        raise ValueError('theme must be "light" or "dark".')
+    if page_size not in ("A4", "Letter", "A3"):
+        raise ValueError('page_size must be "A4", "Letter", or "A3".')
+
+    # ── Parse notebook ────────────────────────────
+    try:
+        nb = nbformat.reads(raw, as_version=4)
+    except Exception as e:
+        raise ValueError(f"Invalid .ipynb file: {e}")
+
+    # ── Extract metadata ──────────────────────────
     nb_meta = nb.get("metadata", {})
     kernelspec = nb_meta.get("kernelspec", {})
-    language = kernelspec.get("language", "python")
-    cells = nb.get("cells", [])
+    language = kernelspec.get("language", "python").capitalize()
 
-    # ── Helpers ───────────────────────────────────
-    def _escape(text: str) -> str:
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if not author:
+        nb_authors = nb_meta.get("authors", [])
+        if isinstance(nb_authors, list) and nb_authors:
+            author = nb_authors[0].get("name", "")
 
-    def _source(cell) -> str:
-        src = cell.get("source", [])
-        if isinstance(src, list):
-            return "".join(src)
-        return src
+    total_cells = len(nb.cells)
+    code_cells = sum(1 for c in nb.cells if c.cell_type == "code")
+    md_cells = sum(1 for c in nb.cells if c.cell_type == "markdown")
 
-    def _inline_md(text: str) -> str:
-        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-        text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
-        text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
-        text = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", text)
-        text = re.sub(r"_([^_]+)_", r"<em>\1</em>", text)
-        return text
+    # ── Configure HTMLExporter ────────────────────
+    exporter = HTMLExporter(theme=theme)
+    exporter.exclude_input = not include_input
+    exporter.exclude_output = not include_output
+    exporter.exclude_markdown = not include_markdown
+    exporter.exclude_input_prompt = False  # keep In  [N]: labels
+    exporter.exclude_output_prompt = False  # keep Out [N]: labels
+    exporter.exclude_anchor_links = True  # cleaner output
 
-    def _render_markdown(text: str) -> str:
-        lines = text.split("\n")
-        html = []
-        in_list = False
-        for line in lines:
-            m = re.match(r"^(#{1,6})\s+(.*)", line)
-            if m:
-                if in_list:
-                    html.append("</ul>")
-                    in_list = False
-                level = len(m.group(1))
-                html.append(f"<h{level}>{_inline_md(m.group(2))}</h{level}>")
-                continue
-            m = re.match(r"^[\-\*]\s+(.*)", line)
-            if m:
-                if not in_list:
-                    html.append("<ul>")
-                    in_list = True
-                html.append(f"<li>{_inline_md(m.group(1))}</li>")
-                continue
-            if in_list and not line.strip():
-                html.append("</ul>")
-                in_list = False
-            if not line.strip():
-                html.append("<br/>")
-                continue
-            html.append(f"<p>{_inline_md(line)}</p>")
-        if in_list:
-            html.append("</ul>")
-        return "\n".join(html)
+    html_body, _ = exporter.from_notebook_node(nb)
 
-    def _render_output(output) -> str:
-        otype = output.get("output_type", "")
-        parts = []
-
-        if otype == "stream":
-            text = "".join(output.get("text", []))
-            cls = "out-stderr" if output.get("name") == "stderr" else "out-stdout"
-            parts.append(f'<pre class="cell-output {cls}">{_escape(text)}</pre>')
-
-        elif otype in ("display_data", "execute_result"):
-            data = output.get("data", {})
-            for mime in ("image/png", "image/jpeg", "image/svg+xml"):
-                if mime in data:
-                    if mime == "image/svg+xml":
-                        svg = (
-                            "".join(data[mime])
-                            if isinstance(data[mime], list)
-                            else data[mime]
-                        )
-                        parts.append(f'<div class="cell-image">{svg}</div>')
-                    else:
-                        img_data = (
-                            "".join(data[mime])
-                            if isinstance(data[mime], list)
-                            else data[mime]
-                        )
-                        parts.append(
-                            f'<div class="cell-image">'
-                            f'<img src="data:{mime};base64,{img_data}" alt="output"/>'
-                            f"</div>"
-                        )
-                    break
-            if not parts and "text/plain" in data:
-                text = (
-                    "".join(data["text/plain"])
-                    if isinstance(data["text/plain"], list)
-                    else data["text/plain"]
-                )
-                parts.append(
-                    f'<pre class="cell-output out-stdout">{_escape(text)}</pre>'
-                )
-            if not parts and "text/html" in data:
-                html_out = (
-                    "".join(data["text/html"])
-                    if isinstance(data["text/html"], list)
-                    else data["text/html"]
-                )
-                parts.append(f'<div class="cell-html-output">{html_out}</div>')
-
-        elif otype == "error":
-            ename = _escape(output.get("ename", ""))
-            evalue = _escape(output.get("evalue", ""))
-            parts.append(f'<pre class="cell-output out-stderr">{ename}: {evalue}</pre>')
-
-        return "\n".join(parts)
+    # ── Strip complex nbconvert CSS ───────────────
+    # xhtml2pdf cannot parse modern CSS selectors used by nbconvert
+    # (e.g. :not(), CSS variables, complex pseudo-classes).
+    # We remove all <style> blocks and inject our own clean set.
+    html_body = re.sub(r"<style[^>]*>.*?</style>", "", html_body, flags=re.DOTALL)
 
     # ── Colour palette ────────────────────────────
     if theme == "dark":
-        bg = "#1e1e2e"
         fg = "#cdd6f4"
         code_bg = "#181825"
-        code_fg = "#cdd6f4"
-        out_bg = "#11111b"
-        border_col = "#313244"
         head_col = "#89b4fa"
-        num_col = "#6c7086"
-        err_bg = "#3b1f2b"
-        err_fg = "#f38ba8"
-        md_bg = "#1e1e2e"
+        border_c = "#42a5f5"
     else:
-        bg = "#ffffff"
         fg = "#212121"
         code_bg = "#f5f5f5"
-        code_fg = "#212121"
-        out_bg = "#fafafa"
-        border_col = "#e0e0e0"
         head_col = "#1565C0"
-        num_col = "#9e9e9e"
-        err_bg = "#fff3f3"
-        err_fg = "#c62828"
-        md_bg = "#ffffff"
+        border_c = "#42a5f5"
 
-    # ── CSS ───────────────────────────────────────
-    css = f"""
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-    font-family : Georgia, 'Times New Roman', serif;
+    page_map = {"A4": "A4", "Letter": "letter", "A3": "A3"}
+
+    def _esc(s: str) -> str:
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    author_line = f"<p><b>{_esc(author)}</b></p>" if author else ""
+
+    # ── Inject clean CSS + cover block ───────────
+    injected = f"""
+<style>
+  @page {{
+    size   : {page_map[page_size]};
+    margin : 1.8cm 2cm;
+  }}
+  body {{
+    font-family : Arial, Helvetica, sans-serif;
     font-size   : 11pt;
-    line-height : 1.7;
+    line-height : 1.6;
     color       : {fg};
-    background  : {bg};
-    padding     : 2cm 2.5cm;
-}}
-.title-block {{
-    text-align    : center;
-    margin-bottom : 2em;
-    padding-bottom: 1em;
-    border-bottom : 3px solid {head_col};
-}}
-.title-block h1 {{
-    font-size : 22pt;
-    color     : {head_col};
-    margin    : 0 0 0.3em;
-}}
-.title-block .meta {{
-    font-size : 10pt;
-    color     : {num_col};
-}}
-.cell {{
-    margin      : 0.8em 0;
-    border-left : 3px solid {border_col};
-    padding-left: 0.8em;
-}}
-.cell-code {{ border-left-color: #42a5f5; }}
-.cell-md   {{
-    border-left-color : {head_col};
-    background        : {md_bg};
-    padding           : 0.5em 0.8em;
-    border-radius     : 4px;
-}}
-.cell-raw  {{ border-left-color: {num_col}; }}
-.prompt {{
-    font-family   : 'Courier New', Courier, monospace;
-    font-size     : 8pt;
-    color         : {num_col};
-    margin-bottom : 0.2em;
-}}
-pre.cell-code-src {{
-    font-family  : 'Courier New', Courier, monospace;
-    font-size    : 9pt;
-    background   : {code_bg};
-    color        : {code_fg};
-    padding      : 0.7em 1em;
-    border-radius: 6px;
-    white-space  : pre-wrap;
-    word-break   : break-all;
-    overflow-wrap: break-word;
-    margin       : 0.3em 0;
-    border       : 1px solid {border_col};
-}}
-pre.cell-output {{
-    font-family  : 'Courier New', Courier, monospace;
-    font-size    : 9pt;
-    padding      : 0.6em 1em;
-    border-radius: 4px;
-    white-space  : pre-wrap;
-    word-break   : break-all;
-    overflow-wrap: break-word;
-    margin       : 0.3em 0;
-}}
-pre.out-stdout {{
-    background : {out_bg};
-    color      : {code_fg};
-    border     : 1px solid {border_col};
-}}
-pre.out-stderr {{
-    background : {err_bg};
-    color      : {err_fg};
-    border     : 1px solid {err_fg};
-}}
-.cell-image {{
-    margin     : 0.5em 0;
-    text-align : center;
-}}
-.cell-image img {{
+  }}
+  h1 {{ font-size: 18pt; color: {head_col}; }}
+  h2 {{ font-size: 14pt; color: {head_col}; }}
+  h3 {{ font-size: 12pt; color: {head_col}; }}
+  h4, h5, h6 {{ font-size: 11pt; color: {head_col}; }}
+  p  {{ margin: 4pt 0; }}
+  pre, code {{
+    font-family : Courier, monospace;
+    font-size   : 9pt;
+    background  : {code_bg};
+  }}
+  pre {{
+    padding     : 8pt;
+    border-left : 3pt solid {border_c};
+    margin      : 6pt 0;
+  }}
+  code {{ padding: 1pt 3pt; }}
+  ul, ol {{ margin: 4pt 0; padding-left: 18pt; }}
+  li     {{ margin: 2pt 0; }}
+  table {{
+    width           : 100%;
+    border-collapse : collapse;
+    font-size       : 9pt;
+    margin          : 8pt 0;
+  }}
+  th {{
+    background : {head_col};
+    color      : #ffffff;
+    padding    : 4pt 6pt;
+    text-align : left;
+  }}
+  td {{
+    padding : 3pt 6pt;
+    border  : 0.5pt solid #e0e0e0;
+  }}
+  img {{
     max-width : 100%;
     height    : auto;
-}}
-.cell-html-output {{
-    font-size : 9pt;
-    max-width : 100%;
-    overflow  : hidden;
-}}
-.cell-md h1, .cell-md h2, .cell-md h3,
-.cell-md h4, .cell-md h5, .cell-md h6 {{
+  }}
+  .nb-cover {{
+    text-align    : center;
+    padding       : 20pt 0 16pt;
+    border-bottom : 2pt solid {head_col};
+    margin-bottom : 16pt;
+  }}
+  .nb-cover-title {{
+    font-size   : 22pt;
     color       : {head_col};
-    margin      : 0.5em 0 0.2em;
-    line-height : 1.3;
-}}
-.cell-md h1 {{ font-size: 16pt; }}
-.cell-md h2 {{ font-size: 14pt; }}
-.cell-md h3 {{ font-size: 12pt; }}
-.cell-md p  {{ margin: 0.3em 0; }}
-.cell-md code {{
-    font-family   : 'Courier New', monospace;
-    font-size     : 9pt;
-    background    : {code_bg};
-    padding       : 0.1em 0.3em;
-    border-radius : 3px;
-}}
-.cell-md ul  {{ padding-left: 1.5em; margin: 0.3em 0; }}
-.cell-md li  {{ margin: 0.15em 0; }}
-.cell-md strong {{ font-weight: 700; }}
-@media print {{ .cell {{ page-break-inside: avoid; }} }}
+    font-weight : bold;
+  }}
+  .nb-meta {{
+    font-size  : 10pt;
+    color      : #757575;
+    margin-top : 6pt;
+  }}
+</style>
+
+<div class="nb-cover">
+  <div class="nb-cover-title">{_esc(title)}</div>
+  <div class="nb-meta">
+    {author_line}
+    <p>
+      {language} kernel &nbsp;&bull;&nbsp;
+      {total_cells} cells ({code_cells} code, {md_cells} markdown)
+    </p>
+  </div>
+</div>
 """
+    html_body = html_body.replace("<body>", "<body>" + injected, 1)
 
-    # ── Build HTML body ───────────────────────────
-    body_parts = []
-    exec_count = 0
-    total_code = 0
-    total_md = 0
-
-    for cell in cells:
-        ctype = cell.get("cell_type", "")
-        src = _source(cell)
-        ex_num = cell.get("execution_count") or ""
-
-        if ctype == "code":
-            total_code += 1
-            parts = []
-            if include_input and src.strip():
-                exec_count += 1
-                num = ex_num if ex_num else exec_count
-                parts.append(
-                    f'<div class="prompt">In [{num}]:</div>'
-                    f'<pre class="cell-code-src">{_escape(src)}</pre>'
-                )
-            if include_output:
-                for out in cell.get("outputs", []):
-                    rendered = _render_output(out)
-                    if rendered:
-                        num = ex_num if ex_num else exec_count
-                        parts.append(
-                            f'<div class="prompt">Out [{num}]:</div>' + rendered
-                        )
-            if parts:
-                body_parts.append(
-                    '<div class="cell cell-code">' + "\n".join(parts) + "</div>"
-                )
-
-        elif ctype == "markdown" and include_markdown:
-            total_md += 1
-            if src.strip():
-                body_parts.append(
-                    f'<div class="cell cell-md">{_render_markdown(src)}</div>'
-                )
-
-        elif ctype == "raw":
-            if src.strip():
-                body_parts.append(
-                    f'<div class="cell cell-raw">'
-                    f'<pre class="cell-code-src">{_escape(src)}</pre>'
-                    f"</div>"
-                )
-
-    # ── Title block ───────────────────────────────
-    meta_parts = []
-    if author:
-        meta_parts.append(_escape(author))
-    meta_parts.append(f"{language.capitalize()} kernel")
-    meta_line = " &nbsp;|&nbsp; ".join(meta_parts)
-
-    title_block = (
-        f'<div class="title-block">'
-        f"<h1>{_escape(title)}</h1>"
-        f'<div class="meta">{meta_line}</div>'
-        f"</div>"
-    )
-
-    # ── Full HTML ─────────────────────────────────
-    full_html = (
-        "<!DOCTYPE html>"
-        "<html><head>"
-        '<meta charset="utf-8"/>'
-        f"<title>{_escape(title)}</title>"
-        f"<style>{css}</style>"
-        "</head><body>" + title_block + "\n".join(body_parts) + "</body></html>"
-    )
-
-    # ── Render PDF ────────────────────────────────
+    # ── Render PDF via xhtml2pdf ──────────────────
     pdf_buf = io.BytesIO()
-    WeasyprintHTML(string=full_html).write_pdf(pdf_buf)
+    result = pisa.CreatePDF(html_body, dest=pdf_buf)
+
+    if result.err:
+        raise ValueError(f"PDF rendering failed with {result.err} error(s).")
+
     pdf_buf.seek(0)
     pdf_bytes = pdf_buf.read()
 
-    if not pdf_bytes:
-        raise ValueError("PDF rendering produced empty output.")
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("PDF rendering produced invalid output.")
 
     return {
         "bytes": pdf_bytes,
         "title": title,
         "author": author,
-        "total_cells": len(cells),
-        "code_cells": total_code,
-        "markdown_cells": total_md,
+        "language": language,
+        "total_cells": total_cells,
+        "code_cells": code_cells,
+        "markdown_cells": md_cells,
         "size_kb": round(len(pdf_bytes) / 1024, 2),
         "size_mb": round(len(pdf_bytes) / (1024 * 1024), 2),
     }

@@ -3227,414 +3227,606 @@ def ipynb_to_pdf(
     source,
     filename: str = "notebook.ipynb",
     title: str = "",
-    author: str = "",
-    include_input: bool = True,
     include_output: bool = True,
+    include_input: bool = True,
     include_markdown: bool = True,
-    theme: str = "light",
-    page_size: str = "A4",
+    encoding: str = "utf-8",
 ) -> dict:
     """
     Convert Jupyter Notebook (.ipynb) → PDF.
 
     Strategy:
-        1. Parse .ipynb with nbformat
-        2. Walk cells manually — code, markdown, raw, outputs
-        3. Render to PDF using reportlab (pure Python, zero C deps)
-        4. Supports light/dark theme, A4/Letter/A3 page size
+        1. Try nbconvert + pdflatex (best quality)
+        2. Try nbconvert + pandoc   (good quality)
+        3. Fallback → pure Python   (reportlab, basic)
 
     Args:
-        source           : file object OR raw bytes
-        filename         : original filename
-        title            : document title        (default: filename)
-        author           : author name           (default: notebook metadata)
-        include_input    : render code inputs     (default: True)
-        include_output   : render cell outputs    (default: True)
-        include_markdown : render markdown cells  (default: True)
-        theme            : 'light' or 'dark'      (default: 'light')
-        page_size        : 'A4', 'Letter', 'A3'  (default: 'A4')
+        source          : file object | raw JSON string | bytes
+        filename        : original filename
+        title           : document title      (default: filename)
+        include_output  : include cell outputs (default: True)
+        include_input   : include code cells   (default: True)
+        include_markdown: include markdown cells (default: True)
+        encoding        : input encoding       (default: utf-8)
 
     Returns:
         {
-            'bytes'         : bytes,
-            'title'         : str,
-            'author'        : str,
-            'language'      : str,
-            'total_cells'   : int,
-            'code_cells'    : int,
-            'markdown_cells': int,
-            'size_kb'       : float,
-            'size_mb'       : float,
+            'bytes'     : bytes,
+            'method'    : str,
+            'cells'     : int,
+            'pages'     : int,
+            'size_kb'   : float,
+            'size_mb'   : float,
+            'title'     : str,
         }
     """
-    import io
-    import re
     import nbformat
-    from reportlab.lib.pagesizes import A4, letter, A3
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
-    from reportlab.lib import colors
-    from reportlab.platypus import (
-        SimpleDocTemplate,
-        Paragraph,
-        Spacer,
-        HRFlowable,
-        KeepTogether,
-        ListFlowable,
-        ListItem,
-    )
-    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+    import shutil
+    import re
 
     # ── Read source ───────────────────────────────
     if hasattr(source, "read"):
         raw = source.read()
-        if not title:
-            title = getattr(source, "name", filename)
-    elif isinstance(source, (bytes, str)):
+        if isinstance(raw, bytes):
+            raw = raw.decode(encoding, errors="replace")
+    elif isinstance(source, bytes):
+        raw = source.decode(encoding, errors="replace")
+    elif isinstance(source, str):
         raw = source
     else:
-        raise ValueError("source must be a file object, bytes, or str.")
+        raise ValueError("source must be a string, bytes, or file object.")
 
-    if not raw:
-        raise ValueError("Empty file.")
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    if not title:
-        title = filename.replace(".ipynb", "").replace(".IPYNB", "")
-
-    # ── Validate options ──────────────────────────
-    if theme not in ("light", "dark"):
-        raise ValueError('theme must be "light" or "dark".')
-    if page_size not in ("A4", "Letter", "A3"):
-        raise ValueError('page_size must be "A4", "Letter", or "A3".')
+    if not raw.strip():
+        raise ValueError("Empty input.")
 
     # ── Parse notebook ────────────────────────────
     try:
         nb = nbformat.reads(raw, as_version=4)
     except Exception as e:
-        raise ValueError(f"Invalid .ipynb file: {e}")
+        raise ValueError(f"Invalid notebook format: {e}")
 
-    # ── Extract metadata ──────────────────────────
-    nb_meta = nb.get("metadata", {})
-    language = nb_meta.get("kernelspec", {}).get("language", "python").capitalize()
+    if not title:
+        title = filename.replace(".ipynb", "").replace(".IPYNB", "")
 
-    if not author:
-        nb_authors = nb_meta.get("authors", [])
-        if isinstance(nb_authors, list) and nb_authors:
-            author = nb_authors[0].get("name", "")
+    cell_count = len(nb.cells)
 
-    total_cells = len(nb.cells)
-    code_cells = sum(1 for c in nb.cells if c.cell_type == "code")
-    md_cells = sum(1 for c in nb.cells if c.cell_type == "markdown")
+    # ── Try nbconvert + pdflatex ──────────────────
+    jupyter_path = shutil.which("jupyter")
+    pdflatex = shutil.which("pdflatex")
 
-    # ── Colour palette ────────────────────────────
-    if theme == "dark":
-        FG = colors.HexColor("#cdd6f4")
-        HEAD_COL = colors.HexColor("#89b4fa")
-        CODE_BG = colors.HexColor("#181825")
-        PRMPT_C = colors.HexColor("#42a5f5")
-    else:
-        FG = colors.HexColor("#212121")
-        HEAD_COL = colors.HexColor("#1565C0")
-        CODE_BG = colors.HexColor("#f5f5f5")
-        PRMPT_C = colors.HexColor("#42a5f5")
+    if jupyter_path and pdflatex:
+        try:
+            return _ipynb_to_pdf_nbconvert(
+                raw,
+                filename,
+                title,
+                cell_count,
+                jupyter_path,
+                method="pdflatex",
+            )
+        except Exception:
+            pass
 
-    BLUE = colors.HexColor("#1565C0")
-    GREY_TXT = colors.HexColor("#757575")
-    RED_BG = colors.HexColor("#fff3f3")
-    RED_TXT = colors.HexColor("#c62828")
+    # ── Try nbconvert + pandoc ─────────────────────
+    pandoc = shutil.which("pandoc")
+    if jupyter_path and pandoc:
+        try:
+            return _ipynb_to_pdf_nbconvert(
+                raw,
+                filename,
+                title,
+                cell_count,
+                jupyter_path,
+                method="html",
+            )
+        except Exception:
+            pass
 
-    # ── Paragraph styles ──────────────────────────
-    base = ParagraphStyle(
-        "nb_base",
-        fontName="Helvetica",
-        fontSize=10,
-        leading=15,
-        textColor=FG,
-        spaceAfter=4,
+    # ── Fallback: pure Python ─────────────────────
+    return _ipynb_to_pdf_fallback(
+        nb,
+        filename,
+        title,
+        cell_count,
+        include_input=include_input,
+        include_output=include_output,
+        include_markdown=include_markdown,
     )
-    st = {
-        "h1": ParagraphStyle(
-            "nb_h1",
-            parent=base,
+
+
+def _ipynb_to_pdf_nbconvert(
+    raw: str,
+    filename: str,
+    title: str,
+    cell_count: int,
+    jupyter_path: str,
+    method: str = "pdflatex",
+) -> dict:
+    """Convert notebook using nbconvert CLI."""
+    import subprocess
+    import tempfile
+
+    base = filename.replace(".ipynb", "").replace(".IPYNB", "")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        nb_path = os.path.join(tmp, f"{base}.ipynb")
+        pdf_path = os.path.join(tmp, f"{base}.pdf")
+
+        with open(nb_path, "w", encoding="utf-8") as f:
+            f.write(raw)
+
+        if method == "pdflatex":
+            cmd = [
+                jupyter_path,
+                "nbconvert",
+                "--to",
+                "pdf",
+                "--output-dir",
+                tmp,
+                nb_path,
+            ]
+        else:
+            # html → pdf via pandoc
+            html_path = os.path.join(tmp, f"{base}.html")
+            cmd = [
+                jupyter_path,
+                "nbconvert",
+                "--to",
+                "html",
+                "--output-dir",
+                tmp,
+                nb_path,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if not os.path.exists(html_path):
+                raise RuntimeError("nbconvert html failed.")
+
+            # pandoc html → pdf
+            cmd = [
+                "pandoc",
+                html_path,
+                "-o",
+                pdf_path,
+                "--pdf-engine=weasyprint",
+            ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=tmp,
+        )
+
+        if not os.path.exists(pdf_path):
+            raise RuntimeError(f"nbconvert failed: {result.stderr[:500]}")
+
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+    pages = _count_pdf_pages(pdf_bytes)
+
+    return {
+        "bytes": pdf_bytes,
+        "method": f"nbconvert-{method}",
+        "cells": cell_count,
+        "pages": pages,
+        "size_kb": round(len(pdf_bytes) / 1024, 2),
+        "size_mb": round(len(pdf_bytes) / (1024 * 1024), 2),
+        "title": title,
+    }
+
+
+def _ipynb_to_pdf_fallback(
+    nb,
+    filename: str,
+    title: str,
+    cell_count: int,
+    include_input: bool = True,
+    include_output: bool = True,
+    include_markdown: bool = True,
+) -> dict:
+    """
+    Pure Python fallback:
+    Parse notebook cells → reportlab PDF.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+        PageBreak,
+        HRFlowable,
+        Preformatted,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet
+    import re
+    import base64
+
+    # ── Styles ────────────────────────────────────
+    def S(name, **kw):
+        return ParagraphStyle(name, **kw)
+
+    styles = {
+        "title": S(
+            "nb_title",
             fontName="Helvetica-Bold",
-            fontSize=18,
-            textColor=HEAD_COL,
-            spaceAfter=6,
-            spaceBefore=12,
-        ),
-        "h2": ParagraphStyle(
-            "nb_h2",
-            parent=base,
-            fontName="Helvetica-Bold",
-            fontSize=14,
-            textColor=HEAD_COL,
-            spaceAfter=4,
+            fontSize=22,
+            textColor=colors.HexColor("#1F4E79"),
+            alignment=TA_CENTER,
+            spaceAfter=20,
             spaceBefore=10,
+            leading=28,
         ),
-        "h3": ParagraphStyle(
-            "nb_h3",
-            parent=base,
+        "h1": S(
+            "nb_h1",
             fontName="Helvetica-Bold",
-            fontSize=12,
-            textColor=HEAD_COL,
-            spaceAfter=4,
-            spaceBefore=8,
+            fontSize=16,
+            textColor=colors.HexColor("#2E75B6"),
+            spaceAfter=8,
+            spaceBefore=14,
+            leading=22,
         ),
-        "h4": ParagraphStyle(
-            "nb_h4",
-            parent=base,
+        "h2": S(
+            "nb_h2",
+            fontName="Helvetica-Bold",
+            fontSize=13,
+            textColor=colors.HexColor("#2E75B6"),
+            spaceAfter=6,
+            spaceBefore=10,
+            leading=18,
+        ),
+        "h3": S(
+            "nb_h3",
             fontName="Helvetica-Bold",
             fontSize=11,
-            textColor=HEAD_COL,
-            spaceAfter=3,
-            spaceBefore=6,
+            textColor=colors.HexColor("#1F4E79"),
+            spaceAfter=4,
+            spaceBefore=8,
+            leading=15,
         ),
-        "body": ParagraphStyle("nb_body", parent=base, alignment=TA_JUSTIFY),
-        "li": ParagraphStyle("nb_li", parent=base, leftIndent=16, spaceAfter=2),
-        "code": ParagraphStyle(
+        "body": S(
+            "nb_body",
+            fontName="Helvetica",
+            fontSize=10,
+            spaceAfter=4,
+            spaceBefore=2,
+            alignment=TA_JUSTIFY,
+            leading=14,
+        ),
+        "bullet": S(
+            "nb_bullet",
+            fontName="Helvetica",
+            fontSize=10,
+            spaceAfter=2,
+            spaceBefore=2,
+            leftIndent=20,
+            leading=13,
+        ),
+        "code": S(
             "nb_code",
             fontName="Courier",
             fontSize=8,
-            leading=11,
-            textColor=FG,
-            backColor=CODE_BG,
-            leftIndent=8,
-            rightIndent=8,
             spaceAfter=2,
-        ),
-        "prompt": ParagraphStyle(
-            "nb_prompt",
-            fontName="Courier-Bold",
-            fontSize=8,
+            spaceBefore=2,
+            leftIndent=10,
             leading=11,
-            textColor=PRMPT_C,
-            spaceAfter=1,
+            backColor=colors.HexColor("#F5F5F5"),
+            textColor=colors.HexColor("#24292E"),
         ),
-        "stderr": ParagraphStyle(
-            "nb_stderr",
+        "output": S(
+            "nb_output",
             fontName="Courier",
             fontSize=8,
-            leading=11,
-            textColor=RED_TXT,
-            backColor=RED_BG,
-            leftIndent=8,
-            rightIndent=8,
             spaceAfter=2,
+            spaceBefore=2,
+            leftIndent=10,
+            leading=11,
+            textColor=colors.HexColor("#333333"),
         ),
-        "cover_t": ParagraphStyle(
-            "nb_cover_t",
+        "label": S(
+            "nb_label",
             fontName="Helvetica-Bold",
-            fontSize=24,
-            textColor=HEAD_COL,
-            alignment=TA_CENTER,
-            spaceAfter=6,
+            fontSize=8,
+            textColor=colors.white,
+            spaceAfter=0,
+            spaceBefore=6,
+            leading=10,
         ),
-        "cover_m": ParagraphStyle(
-            "nb_cover_m",
-            fontName="Helvetica",
-            fontSize=10,
-            textColor=GREY_TXT,
-            alignment=TA_CENTER,
-            spaceAfter=3,
+        "error": S(
+            "nb_error",
+            fontName="Courier",
+            fontSize=8,
+            textColor=colors.HexColor("#C0392B"),
+            spaceAfter=2,
+            spaceBefore=2,
+            leftIndent=10,
+            leading=11,
         ),
     }
 
-    # ── Helpers ───────────────────────────────────
-    def _esc(text: str) -> str:
+    # ── Helpers ────────────────────────────────────
+    def escape(text: str) -> str:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    def _inline(text: str) -> str:
-        """Basic inline markdown → ReportLab XML."""
-        text = _esc(text)
-        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-        text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
-        text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-        text = re.sub(r"_(.+?)_", r"<i>\1</i>", text)
-        text = re.sub(r"`(.+?)`", r'<font face="Courier">\1</font>', text)
-        return text
+    def safe_para(text: str, style, max_len=3000) -> Paragraph:
+        text = text[:max_len]
+        try:
+            return Paragraph(text, style)
+        except Exception:
+            return Paragraph(escape(re.sub(r"<[^>]+>", "", text)), style)
 
-    def _src(cell) -> str:
-        s = cell.get("source", "")
-        return "".join(s) if isinstance(s, list) else s
+    def code_cell_label(idx: int, cell_type: str) -> Table:
+        """Colored label bar for code cells."""
+        color = "#2E75B6" if cell_type == "code" else "#70AD47"
+        label = f"In [{idx}]:" if cell_type == "code" else "Markdown"
+        data = [
+            [Paragraph(f'<font color="white"><b>{label}</b></font>', styles["label"])]
+        ]
+        tbl = Table(data, colWidths=[A4[0] - 2 * inch])
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(color)),
+                    ("PADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        return tbl
 
-    def _render_markdown(text: str) -> list:
-        """Markdown block → list of ReportLab flowables."""
-        elems = []
+    def output_label() -> Table:
+        """Grey label for output."""
+        data = [[Paragraph('<font color="white"><b>Out:</b></font>', styles["label"])]]
+        tbl = Table(data, colWidths=[A4[0] - 2 * inch])
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#595959")),
+                    ("PADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        return tbl
+
+    def render_markdown(text: str, story: list):
+        """Simple markdown → reportlab paragraphs."""
         lines = text.split("\n")
         i = 0
         while i < len(lines):
             line = lines[i]
+
             # Headings
-            m = re.match(r"^(#{1,4})\s+(.*)", line)
+            m = re.match(r"^(#{1,3})\s+(.+)$", line)
             if m:
-                level = min(len(m.group(1)), 4)
-                elems.append(Paragraph(_inline(m.group(2)), st[f"h{level}"]))
+                level = len(m.group(1))
+                htext = escape(m.group(2))
+                sname = f"h{level}"
+                story.append(safe_para(htext, styles.get(sname, styles["h3"])))
                 i += 1
                 continue
-            # Unordered list
-            if re.match(r"^[\-\*]\s+", line):
-                items = []
-                while i < len(lines) and re.match(r"^[\-\*]\s+(.*)", lines[i]):
-                    lm = re.match(r"^[\-\*]\s+(.*)", lines[i])
-                    items.append(
-                        ListItem(
-                            Paragraph(_inline(lm.group(1)), st["li"]),
-                            bulletColor=BLUE,
-                            leftIndent=16,
-                        )
-                    )
-                    i += 1
-                elems.append(ListFlowable(items, bulletType="bullet", start="•"))
-                continue
-            # Ordered list
-            if re.match(r"^\d+\.\s+", line):
-                items = []
-                idx = 1
-                while i < len(lines) and re.match(r"^\d+\.\s+(.*)", lines[i]):
-                    lm = re.match(r"^\d+\.\s+(.*)", lines[i])
-                    items.append(
-                        ListItem(
-                            Paragraph(_inline(lm.group(1)), st["li"]),
-                            value=idx,
-                        )
-                    )
-                    i += 1
-                    idx += 1
-                elems.append(ListFlowable(items, bulletType="1"))
-                continue
-            # Blank line
-            if not line.strip():
-                elems.append(Spacer(1, 4))
+
+            # Bullet
+            m = re.match(r"^[-*+]\s+(.+)$", line)
+            if m:
+                story.append(safe_para(f"• {escape(m.group(1))}", styles["bullet"]))
                 i += 1
                 continue
-            # Normal paragraph
-            elems.append(Paragraph(_inline(line), st["body"]))
-            i += 1
-        return elems
 
-    def _render_output(output: dict, num) -> list:
-        """Cell output → list of ReportLab flowables."""
-        elems = []
-        otype = output.get("output_type", "")
-        label = f"Out [{num}]:"
+            # Numbered
+            m = re.match(r"^\d+[.)]\s+(.+)$", line)
+            if m:
+                story.append(safe_para(escape(line), styles["bullet"]))
+                i += 1
+                continue
 
-        if otype == "stream":
-            text = "".join(output.get("text", []))
-            sty = st["stderr"] if output.get("name") == "stderr" else st["code"]
-            elems.append(Paragraph(_esc(label), st["prompt"]))
-            for line in text.splitlines():
-                elems.append(Paragraph(_esc(line) or " ", sty))
-
-        elif otype in ("display_data", "execute_result"):
-            data = output.get("data", {})
-            if "text/plain" in data:
-                txt = data["text/plain"]
-                txt = "".join(txt) if isinstance(txt, list) else txt
-                elems.append(Paragraph(_esc(label), st["prompt"]))
-                for line in txt.splitlines():
-                    elems.append(Paragraph(_esc(line) or " ", st["code"]))
-
-        elif otype == "error":
-            elems.append(Paragraph(_esc(label), st["prompt"]))
-            elems.append(
-                Paragraph(
-                    f"{_esc(output.get('ename',''))}: {_esc(output.get('evalue',''))}",
-                    st["stderr"],
+            # Horizontal rule
+            if re.match(r"^[-*_]{3,}$", line.strip()):
+                story.append(
+                    HRFlowable(
+                        width="100%",
+                        thickness=0.5,
+                        color=colors.HexColor("#CCCCCC"),
+                        spaceAfter=4,
+                        spaceBefore=4,
+                    )
                 )
-            )
+                i += 1
+                continue
 
-        return elems
+            # Bold / italic inline
+            if line.strip():
+                txt = escape(line)
+                txt = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", txt)
+                txt = re.sub(r"\*(.+?)\*", r"<i>\1</i>", txt)
+                txt = re.sub(r"`(.+?)`", r'<font name="Courier">\1</font>', txt)
+                story.append(safe_para(txt, styles["body"]))
 
-    # ── Build PDF story ───────────────────────────
-    PAGE_MAP = {"A4": A4, "Letter": letter, "A3": A3}
+            i += 1
 
-    buf = io.BytesIO()
+    def render_code(source: str, story: list, idx: int):
+        """Render code cell."""
+        story.append(code_cell_label(idx, "code"))
+        lines = source.split("\n")
+        for line in lines:
+            story.append(Preformatted(line[:200], styles["code"]))
+        story.append(Spacer(1, 4))
+
+    def render_output(outputs: list, story: list):
+        """Render cell outputs."""
+        if not outputs:
+            return
+
+        story.append(output_label())
+
+        for output in outputs:
+            out_type = output.get("output_type", "")
+
+            # ── Stream output ───────────────────────
+            if out_type == "stream":
+                text = "".join(output.get("text", []))
+                for line in text.split("\n")[:50]:
+                    story.append(Preformatted(line[:200], styles["output"]))
+
+            # ── Execute result ──────────────────────
+            elif out_type in ("execute_result", "display_data"):
+                data = output.get("data", {})
+
+                # Plain text
+                if "text/plain" in data:
+                    text = "".join(data["text/plain"])
+                    for line in text.split("\n")[:50]:
+                        story.append(Preformatted(line[:200], styles["output"]))
+
+                # HTML table (basic strip)
+                elif "text/html" in data:
+                    html = "".join(data["text/html"])
+                    html = re.sub(r"<[^>]+>", " ", html)
+                    html = re.sub(r"\s+", " ", html).strip()
+                    story.append(safe_para(escape(html[:500]), styles["output"]))
+
+                # Image (PNG/JPEG base64)
+                if "image/png" in data or "image/jpeg" in data:
+                    try:
+                        from reportlab.platypus import Image as RLImage
+                        from PIL import Image as PILImage
+
+                        key = "image/png" if "image/png" in data else "image/jpeg"
+                        b64data = data[key]
+                        if isinstance(b64data, list):
+                            b64data = "".join(b64data)
+
+                        img_bytes = base64.b64decode(b64data)
+                        pil_img = PILImage.open(io.BytesIO(img_bytes))
+
+                        # Scale to fit page
+                        max_w = A4[0] - 2 * inch
+                        max_h = A4[1] / 2
+                        img_w, img_h = pil_img.size
+                        ratio = min(max_w / img_w, max_h / img_h, 1.0)
+                        disp_w = img_w * ratio
+                        disp_h = img_h * ratio
+
+                        rl_img = RLImage(
+                            io.BytesIO(img_bytes),
+                            width=disp_w,
+                            height=disp_h,
+                        )
+                        story.append(rl_img)
+                    except Exception:
+                        pass
+
+            # ── Error output ────────────────────────
+            elif out_type == "error":
+                ename = output.get("ename", "Error")
+                evalue = output.get("evalue", "")
+                err_text = f"{ename}: {evalue}"
+                # Strip ANSI escape codes
+                err_text = re.sub(r"\x1b\[[0-9;]*m", "", err_text)
+                story.append(safe_para(escape(err_text[:500]), styles["error"]))
+
+        story.append(Spacer(1, 6))
+
+    # ─────────────────────────────────────────────
+    # Build PDF story
+    # ─────────────────────────────────────────────
+    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf,
-        pagesize=PAGE_MAP[page_size],
-        leftMargin=2 * cm,
-        rightMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2 * cm,
+        buffer,
+        pagesize=A4,
+        rightMargin=inch,
+        leftMargin=inch,
+        topMargin=inch,
+        bottomMargin=inch,
+        title=title,
     )
 
     story = []
 
-    # ── Cover block ───────────────────────────────
-    story.append(Spacer(1, 1 * cm))
-    story.append(Paragraph(_esc(title), st["cover_t"]))
-    story.append(HRFlowable(width="100%", thickness=2, color=BLUE, spaceAfter=6))
-    if author:
-        story.append(Paragraph(f"<b>{_esc(author)}</b>", st["cover_m"]))
-    story.append(
-        Paragraph(
-            f"{language} kernel &nbsp;•&nbsp; "
-            f"{total_cells} cells ({code_cells} code, {md_cells} markdown)",
-            st["cover_m"],
-        )
-    )
-    story.append(Spacer(1, 0.6 * cm))
+    # ── Title ─────────────────────────────────────
+    story.append(safe_para(escape(title), styles["title"]))
     story.append(
         HRFlowable(
             width="100%",
-            thickness=0.5,
-            color=colors.HexColor("#e0e0e0"),
-            spaceAfter=8,
+            thickness=2,
+            color=colors.HexColor("#2E75B6"),
+            spaceAfter=12,
         )
     )
-    story.append(Spacer(1, 0.2 * cm))
 
-    # ── Cells ─────────────────────────────────────
-    exec_count = 0
+    # ── Stats bar ─────────────────────────────────
+    lang = nb.metadata.get("kernelspec", {}).get("language", "python")
+    k_name = nb.metadata.get("kernelspec", {}).get("display_name", "Python")
+    code_c = sum(1 for c in nb.cells if c.cell_type == "code")
+    md_c = sum(1 for c in nb.cells if c.cell_type == "markdown")
+
+    stats_text = (
+        f"<b>Kernel:</b> {escape(k_name)} | "
+        f"<b>Language:</b> {escape(lang)} | "
+        f"<b>Cells:</b> {cell_count} "
+        f"({code_c} code, {md_c} markdown)"
+    )
+    story.append(safe_para(stats_text, styles["body"]))
+    story.append(Spacer(1, 12))
+
+    # ── Process cells ──────────────────────────────
+    code_idx = 1
+
     for cell in nb.cells:
-        ctype = cell.cell_type
-        src = _src(cell)
+        cell_type = cell.cell_type
+        source = "".join(cell.source) if isinstance(cell.source, list) else cell.source
 
-        if ctype == "code" and (include_input or include_output):
-            exec_count += 1
-            num = cell.get("execution_count") or exec_count
-            block = []
+        if not source.strip() and not cell.get("outputs"):
+            continue
 
-            if include_input and src.strip():
-                block.append(Paragraph(f"In [{num}]:", st["prompt"]))
-                for line in src.splitlines():
-                    block.append(Paragraph(_esc(line) or " ", st["code"]))
-                block.append(Spacer(1, 3))
+        # ── Markdown cell ──────────────────────────
+        if cell_type == "markdown" and include_markdown:
+            render_markdown(source, story)
+            story.append(Spacer(1, 4))
+
+        # ── Code cell ──────────────────────────────
+        elif cell_type == "code":
+            if include_input and source.strip():
+                render_code(source, story, code_idx)
 
             if include_output:
-                for out in cell.get("outputs", []):
-                    block.extend(_render_output(out, num))
+                outputs = cell.get("outputs", [])
+                if outputs:
+                    render_output(outputs, story)
 
-            if block:
-                story.append(KeepTogether(block))
-                story.append(Spacer(1, 6))
+            code_idx += 1
 
-        elif ctype == "markdown" and include_markdown and src.strip():
-            story.extend(_render_markdown(src))
-            story.append(Spacer(1, 4))
+        # ── Raw cell ───────────────────────────────
+        elif cell_type == "raw":
+            if source.strip():
+                story.append(safe_para(escape(source[:500]), styles["body"]))
 
-        elif ctype == "raw" and src.strip():
-            for line in src.splitlines():
-                story.append(Paragraph(_esc(line) or " ", st["code"]))
-            story.append(Spacer(1, 4))
-
-    # ── Render ────────────────────────────────────
+    # ── Build PDF ─────────────────────────────────
     doc.build(story)
-    buf.seek(0)
-    pdf_bytes = buf.read()
-
-    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
-        raise ValueError("PDF rendering failed.")
+    buffer.seek(0)
+    pdf_bytes = buffer.read()
+    pages = _count_pdf_pages(pdf_bytes)
 
     return {
         "bytes": pdf_bytes,
-        "title": title,
-        "author": author,
-        "language": language,
-        "total_cells": total_cells,
-        "code_cells": code_cells,
-        "markdown_cells": md_cells,
+        "method": "reportlab-fallback",
+        "cells": cell_count,
+        "pages": pages,
         "size_kb": round(len(pdf_bytes) / 1024, 2),
         "size_mb": round(len(pdf_bytes) / (1024 * 1024), 2),
+        "title": title,
     }

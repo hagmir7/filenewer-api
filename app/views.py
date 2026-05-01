@@ -6581,95 +6581,91 @@ class PDFToEPUBView(APIView):
 class IPYNBToPDFView(APIView):
     """
     POST /api/convert/ipynb-to-pdf/
-    Upload .ipynb → returns PDF.
+    Upload Jupyter Notebook (.ipynb) → returns PDF.
 
     Form fields:
-        file             : .ipynb file                      (required)
-        title            : document title                   (optional)
-        author           : author name                      (optional)
-        include_input    : true | false  show code input    (default: true)
-        include_output   : true | false  show cell output   (default: true)
-        include_markdown : true | false  show markdown      (default: true)
-        theme            : light | dark                     (default: light)
+        file            : .ipynb file                      (required)
+        title           : document title                   (optional)
+        include_input   : true | false                     (default: true)
+        include_output  : true | false                     (default: true)
+        include_markdown: true | false                     (default: true)
+        encoding        : utf-8 | ascii | latin-1          (default: utf-8)
     """
-
-    parser_classes = [MultiPartParser]
+    parser_classes     = [MultiPartParser]
     permission_classes = [AllowAny]
 
     def post(self, request):
-        file = request.FILES.get("file")
-        title = request.data.get("title", "")
-        author = request.data.get("author", "")
-        include_input = request.data.get("include_input", "true")
-        include_output = request.data.get("include_output", "true")
-        include_markdown = request.data.get("include_markdown", "true")
-        theme = request.data.get("theme", "light")
+        file             = request.FILES.get('file')
+        title            = request.data.get('title',            '')
+        include_input    = request.data.get('include_input',    'true')
+        include_output   = request.data.get('include_output',   'true')
+        include_markdown = request.data.get('include_markdown', 'true')
+        encoding         = request.data.get('encoding',         'utf-8')
 
         # ── Validate ──────────────────────────────
         if not file:
             return Response(
-                {"error": "No file provided."},
+                {'error': 'No file provided.'},
                 status=400,
             )
-        if not file.name.lower().endswith(".ipynb"):
+        if not file.name.lower().endswith('.ipynb'):
             return Response(
-                {"error": "Only .ipynb files are accepted."},
+                {'error': 'Only .ipynb files are accepted.'},
                 status=400,
             )
-        if theme not in ("light", "dark"):
+        if encoding not in ('utf-8', 'ascii', 'latin-1', 'utf-16'):
             return Response(
-                {"error": 'theme must be "light" or "dark".'},
+                {'error': 'encoding must be: utf-8, ascii, latin-1, or utf-16.'},
                 status=400,
             )
 
         # ── Parse booleans ─────────────────────────
         def to_bool(val):
-            if isinstance(val, bool):
-                return val
-            return str(val).lower() == "true"
+            if isinstance(val, bool): return val
+            return str(val).lower() == 'true'
 
-        include_input = to_bool(include_input)
-        include_output = to_bool(include_output)
+        include_input    = to_bool(include_input)
+        include_output   = to_bool(include_output)
         include_markdown = to_bool(include_markdown)
 
         # ── Convert ───────────────────────────────
         try:
             result = ipynb_to_pdf(
                 file,
-                filename=file.name,
-                title=str(title),
-                author=str(author),
-                include_input=include_input,
-                include_output=include_output,
+                filename        =file.name,
+                title           =str(title),
+                include_input   =include_input,
+                include_output  =include_output,
                 include_markdown=include_markdown,
-                theme=theme,
+                encoding        =encoding,
             )
         except ValueError as e:
-            return Response({"error": str(e)}, status=400)
+            return Response({'error': str(e)}, status=400)
         except Exception as e:
-            return Response({"error": str(e)}, status=500)
+            return Response({'error': str(e)}, status=500)
 
         # ── Output filename ───────────────────────
-        pdf_filename = file.name.replace(".ipynb", ".pdf").replace(".IPYNB", ".pdf")
-
-        # ── Return PDF download ───────────────────
-        response = HttpResponse(
-            result["bytes"],
-            content_type="application/pdf",
+        pdf_filename = (
+            file.name
+            .replace('.ipynb', '.pdf')
+            .replace('.IPYNB', '.pdf')
         )
-        response["Content-Disposition"] = f'attachment; filename="{pdf_filename}"'
-        response["Content-Length"] = len(result["bytes"])
-        response["X-Title"] = result["title"]
-        response["X-Author"] = result["author"]
-        response["X-Total-Cells"] = result["total_cells"]
-        response["X-Code-Cells"] = result["code_cells"]
-        response["X-Markdown-Cells"] = result["markdown_cells"]
-        response["X-Size-KB"] = result["size_kb"]
-        response["X-Size-MB"] = result["size_mb"]
+
+        # ── Return PDF download ────────────────────
+        response = HttpResponse(
+            result['bytes'],
+            content_type='application/pdf',
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="{pdf_filename}"'
+        )
+        response['Content-Length'] = len(result['bytes'])
+        response['X-Method']       = result['method']
+        response['X-Cells']        = result['cells']
+        response['X-Pages']        = result['pages']
+        response['X-Size-KB']      = result['size_kb']
+        response['X-Size-MB']      = result['size_mb']
         return response
-
-
-
 
 class MergeExcelView(APIView):
     """

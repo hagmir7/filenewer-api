@@ -6,6 +6,7 @@ from ..views import (
     SQLFileToExcelView,
     SQLTextToExcelView,
     MergeExcelView,
+    SplitExcelView,
 )
 
 urlpatterns = [
@@ -15,4 +16,5 @@ urlpatterns = [
     path('tools/sql-file-to-excel', SQLFileToExcelView.as_view(), name='sql-file-to-excel'),
     path('tools/sql-text-to-excel', SQLTextToExcelView.as_view(), name='sql-text-to-excel'),
     path('tools/merge-excel', MergeExcelView.as_view(), name='merge-excel'),
+    path('tools/split-excel', SplitExcelView.as_view(), name='excel-split'),
 ]

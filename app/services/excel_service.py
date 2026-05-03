@@ -1719,3 +1719,271 @@ def merge_excel(
         "size_kb": round(len(xlsx_bytes) / 1024, 2),
         "size_mb": round(len(xlsx_bytes) / (1024 * 1024), 2),
     }
+
+
+def split_excel(
+    source,
+    split_by: str = "sheet",
+    chunk_size: int = 100,
+    sheets: list = None,
+    password: str = None,
+    encoding: str = "utf-8",
+) -> list[dict]:
+    """
+    Split an Excel (.xlsx/.xls) file into multiple files.
+
+    Args:
+        source     : file object OR raw bytes
+        split_by   : 'sheet'  → one file per sheet
+                     'chunk'  → split each sheet every N rows
+                     'sheets' → extract specific sheets only
+        chunk_size : rows per chunk for 'chunk' mode  (default: 100)
+        sheets     : list of sheet names for 'sheets' mode
+        password   : Excel password if encrypted      (default: None)
+        encoding   : input encoding                  (default: utf-8)
+
+    Returns:
+        list of {
+            'index'     : int,
+            'filename'  : str,
+            'bytes'     : bytes,
+            'sheet'     : str,
+            'rows'      : int,
+            'cols'      : int,
+            'size_kb'   : float,
+        }
+    """
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    import math
+
+    # ── Read source ───────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        filename = getattr(source, "name", "workbook.xlsx")
+    elif isinstance(source, bytes):
+        raw = source
+        filename = "workbook.xlsx"
+    else:
+        raise ValueError("source must be a file object or bytes.")
+
+    if not raw:
+        raise ValueError("Empty file.")
+
+    base_name = (
+        filename.replace(".xlsx", "")
+        .replace(".XLSX", "")
+        .replace(".xls", "")
+        .replace(".XLS", "")
+    )
+
+    # ── Validate ──────────────────────────────────
+    valid_modes = ("sheet", "chunk", "sheets")
+    if split_by not in valid_modes:
+        raise ValueError(f"split_by must be one of: {valid_modes}")
+
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1.")
+
+    # ── Open workbook ──────────────────────────────
+    try:
+        wb = load_workbook(
+            io.BytesIO(raw),
+            data_only=True,
+            read_only=False,
+        )
+    except Exception as e:
+        raise ValueError(f"Cannot open Excel file: {e}")
+
+    available_sheets = wb.sheetnames
+
+    if not available_sheets:
+        raise ValueError("No sheets found in workbook.")
+
+    # ── Style constants ────────────────────────────
+    BLUE = "2E75B6"
+    LIGHT_BLUE = "DCE6F1"
+    WHITE = "FFFFFF"
+    DARK_BLUE = "1F4E79"
+
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    def apply_header_style(cell):
+        cell.font = Font(bold=True, color=WHITE, size=11)
+        cell.fill = PatternFill(fill_type="solid", fgColor=BLUE)
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+        cell.border = thin_border
+
+    def apply_data_style(cell, even_row=False):
+        cell.fill = PatternFill(
+            fill_type="solid",
+            fgColor=LIGHT_BLUE if even_row else WHITE,
+        )
+        cell.font = Font(size=10)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        cell.border = thin_border
+
+    # ── Helper: sheet → list of rows ──────────────
+    def read_sheet_rows(ws) -> list:
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            rows.append(list(row))
+        return rows
+
+    # ── Helper: write rows → new workbook bytes ────
+    def rows_to_workbook(
+        rows: list,
+        sheet_label: str,
+        has_header: bool = True,
+    ) -> bytes:
+        new_wb = Workbook()
+        new_ws = new_wb.active
+        new_ws.title = sheet_label[:31]
+
+        for r_idx, row in enumerate(rows, start=1):
+            for c_idx, value in enumerate(row, start=1):
+                cell = new_ws.cell(row=r_idx, column=c_idx, value=value)
+                if r_idx == 1 and has_header:
+                    apply_header_style(cell)
+                else:
+                    apply_data_style(cell, even_row=(r_idx % 2 == 0))
+
+        # Auto-fit columns
+        _safe_auto_fit(new_ws)
+        new_ws.freeze_panes = "A2" if has_header else None
+
+        buf = io.BytesIO()
+        new_wb.save(buf)
+        buf.seek(0)
+        return buf.read()
+
+    results = []
+    part_index = 1
+
+    # ────────────────────────────────────────────────
+    # MODE 1: One file per sheet
+    # ────────────────────────────────────────────────
+    if split_by == "sheet":
+        for sheet_name in available_sheets:
+            ws = wb[sheet_name]
+            rows = read_sheet_rows(ws)
+
+            if not rows:
+                continue
+
+            data_rows = rows[1:] if len(rows) > 1 else rows
+            xlsx_bytes = rows_to_workbook(rows, sheet_name)
+            safe_name = re.sub(r"[^\w\s-]", "", sheet_name)[:20].strip()
+
+            results.append(
+                {
+                    "index": part_index,
+                    "filename": f"{base_name}_{safe_name}.xlsx",
+                    "bytes": xlsx_bytes,
+                    "sheet": sheet_name,
+                    "rows": len(data_rows),
+                    "cols": len(rows[0]) if rows else 0,
+                    "size_kb": round(len(xlsx_bytes) / 1024, 2),
+                }
+            )
+            part_index += 1
+
+    # ────────────────────────────────────────────────
+    # MODE 2: Split each sheet every N rows
+    # ────────────────────────────────────────────────
+    elif split_by == "chunk":
+        for sheet_name in available_sheets:
+            ws = wb[sheet_name]
+            rows = read_sheet_rows(ws)
+
+            if not rows:
+                continue
+
+            # Separate header from data
+            header = rows[0] if rows else []
+            data_rows = rows[1:] if len(rows) > 1 else []
+
+            if not data_rows:
+                continue
+
+            total_chunks = math.ceil(len(data_rows) / chunk_size)
+            safe_name = re.sub(r"[^\w\s-]", "", sheet_name)[:15].strip()
+
+            for chunk_idx in range(total_chunks):
+                start = chunk_idx * chunk_size
+                end = start + chunk_size
+                chunk = data_rows[start:end]
+
+                # Prepend header
+                chunk_rows = [header] + chunk if header else chunk
+                xlsx_bytes = rows_to_workbook(chunk_rows, sheet_name)
+
+                results.append(
+                    {
+                        "index": part_index,
+                        "filename": (
+                            f"{base_name}_{safe_name}" f"_part{chunk_idx+1}.xlsx"
+                        ),
+                        "bytes": xlsx_bytes,
+                        "sheet": sheet_name,
+                        "rows": len(chunk),
+                        "cols": len(header) if header else 0,
+                        "size_kb": round(len(xlsx_bytes) / 1024, 2),
+                    }
+                )
+                part_index += 1
+
+    # ────────────────────────────────────────────────
+    # MODE 3: Extract specific sheets
+    # ────────────────────────────────────────────────
+    elif split_by == "sheets":
+        if not sheets:
+            raise ValueError(
+                '"sheets" list is required for sheets mode. '
+                f"Available: {available_sheets}"
+            )
+
+        # Validate requested sheets
+        invalid = [s for s in sheets if s not in available_sheets]
+        if invalid:
+            raise ValueError(
+                f"Sheets not found: {invalid}. " f"Available: {available_sheets}"
+            )
+
+        for sheet_name in sheets:
+            ws = wb[sheet_name]
+            rows = read_sheet_rows(ws)
+
+            if not rows:
+                continue
+
+            data_rows = rows[1:] if len(rows) > 1 else rows
+            xlsx_bytes = rows_to_workbook(rows, sheet_name)
+            safe_name = re.sub(r"[^\w\s-]", "", sheet_name)[:20].strip()
+
+            results.append(
+                {
+                    "index": part_index,
+                    "filename": f"{base_name}_{safe_name}.xlsx",
+                    "bytes": xlsx_bytes,
+                    "sheet": sheet_name,
+                    "rows": len(data_rows),
+                    "cols": len(rows[0]) if rows else 0,
+                    "size_kb": round(len(xlsx_bytes) / 1024, 2),
+                }
+            )
+            part_index += 1
+
+    wb.close()
+
+    if not results:
+        raise ValueError("No content found to split. " "The workbook may be empty.")
+
+    return results

@@ -55,7 +55,8 @@ from .services.excel_service import (
     excel_to_markdown,
     markdown_to_excel,
     sql_to_excel,
-    merge_excel
+    merge_excel,
+    split_excel
 )
 
 
@@ -6750,4 +6751,148 @@ class MergeExcelView(APIView):
         response['X-Total-Rows']        = result['total_rows']
         response['X-Size-KB']           = result['size_kb']
         response['X-Size-MB']           = result['size_mb']
+        return response
+
+
+
+class SplitExcelView(APIView):
+    """
+    POST /api/tools/excel-split/
+    Upload Excel file → returns split files as .zip.
+
+    Form fields:
+        file        : Excel file (.xlsx / .xls)            (required)
+        split_by    : sheet | chunk | sheets               (default: sheet)
+        chunk_size  : rows per chunk for chunk mode        (default: 100)
+        sheets      : JSON array for sheets mode           (optional)
+                      e.g. ["Sheet1","Sheet3"]
+        output      : zip | json                           (default: zip)
+    """
+
+    parser_classes = [MultiPartParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        file = request.FILES.get("file")
+        split_by = request.data.get("split_by", "sheet")
+        chunk_size = request.data.get("chunk_size", "100")
+        sheets_raw = request.data.get("sheets", None)
+        output = request.data.get("output", "zip")
+
+        # ── Validate ──────────────────────────────
+        if not file:
+            return Response(
+                {"error": "No file provided."},
+                status=400,
+            )
+        if not file.name.lower().endswith((".xlsx", ".xls")):
+            return Response(
+                {"error": "Only .xlsx or .xls files are accepted."},
+                status=400,
+            )
+        if split_by not in ("sheet", "chunk", "sheets"):
+            return Response(
+                {"error": "split_by must be: sheet, chunk, or sheets."},
+                status=400,
+            )
+        if output not in ("zip", "json"):
+            return Response(
+                {"error": "output must be: zip or json."},
+                status=400,
+            )
+
+        # ── Parse chunk_size ──────────────────────
+        try:
+            chunk_size = int(chunk_size)
+            if chunk_size < 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "chunk_size must be a positive integer."},
+                status=400,
+            )
+
+        # ── Parse sheets ──────────────────────────
+        import json as _json
+
+        parsed_sheets = None
+        if sheets_raw:
+            try:
+                if isinstance(sheets_raw, str):
+                    parsed_sheets = _json.loads(sheets_raw)
+                elif isinstance(sheets_raw, list):
+                    parsed_sheets = sheets_raw
+            except Exception:
+                return Response(
+                    {"error": 'sheets must be valid JSON array: ["Sheet1","Sheet2"]'},
+                    status=400,
+                )
+
+        if split_by == "sheets" and not parsed_sheets:
+            return Response(
+                {
+                    "error": 'sheets is required for sheets mode. e.g. ["Sheet1","Sheet2"]'
+                },
+                status=400,
+            )
+
+        # ── Split ─────────────────────────────────
+        try:
+            parts = split_excel(
+                file,
+                split_by=split_by,
+                chunk_size=chunk_size,
+                sheets=parsed_sheets,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        base_name = (
+            file.name.replace(".xlsx", "")
+            .replace(".XLSX", "")
+            .replace(".xls", "")
+            .replace(".XLS", "")
+        )
+
+        # ── Output: JSON (metadata only) ──────────
+        if output == "json":
+            return Response(
+                {
+                    "total_parts": len(parts),
+                    "split_by": split_by,
+                    "parts": [
+                        {
+                            "index": p["index"],
+                            "filename": p["filename"],
+                            "sheet": p["sheet"],
+                            "rows": p["rows"],
+                            "cols": p["cols"],
+                            "size_kb": p["size_kb"],
+                        }
+                        for p in parts
+                    ],
+                }
+            )
+
+        # ── Output: ZIP ────────────────────────────
+        import zipfile
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for part in parts:
+                zf.writestr(part["filename"], part["bytes"])
+
+        zip_buf.seek(0)
+
+        response = HttpResponse(
+            zip_buf.read(),
+            content_type="application/zip",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="{base_name}_split.zip"'
+        )
+        response["X-Total-Parts"] = len(parts)
+        response["X-Split-By"] = split_by
         return response

@@ -82,7 +82,7 @@ def youtube_to_transcript(
     except Exception as api_error:
         # Save the message now — exception variables are auto-deleted
         # once this except block ends, so we can't reference `api_error`
-        # later (that's what caused the original bug).
+        # later (that caused the original UnboundLocalError bug).
         api_error_msg = str(api_error)
 
     # ── Strategy 2: yt-dlp + Whisper ──────────────
@@ -134,20 +134,22 @@ def _transcribe_via_api(
     """
     Transcribe using YouTube Transcript API.
     No audio download needed — uses YouTube's existing captions.
+
+    NOTE: youtube-transcript-api v1.0+ changed its API:
+      - YouTubeTranscriptApi.list_transcripts(...)  ->  YouTubeTranscriptApi().list(...)
+      - transcript.fetch() now returns a FetchedTranscript object,
+        not a plain list of dicts, so we call .to_raw_data() to convert it
+        into the list[dict] shape the rest of this code expects.
     """
     from youtube_transcript_api import YouTubeTranscriptApi
-    from youtube_transcript_api._errors import (
-        TranscriptsDisabled,
-        NoTranscriptFound,
-        VideoUnavailable,
-    )
 
     # ── Get video metadata ────────────────────────
     title = _get_youtube_title(url)
     duration = 0
 
     # ── Fetch transcript ──────────────────────────
-    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+    ytt_api = YouTubeTranscriptApi()
+    transcript_list = ytt_api.list(video_id)
 
     transcript = None
 
@@ -167,7 +169,6 @@ def _transcribe_via_api(
     # Fallback to any available language
     if transcript is None:
         try:
-            # Get first available
             for t in transcript_list:
                 transcript = t
                 break
@@ -184,7 +185,8 @@ def _transcribe_via_api(
         except Exception:
             pass
 
-    segments = transcript.fetch()
+    fetched = transcript.fetch()
+    segments = fetched.to_raw_data()  # list[dict] with 'text', 'start', 'duration'
     detected_language = translate_to or transcript.language_code
 
     # ── Calculate duration ─────────────────────────
@@ -226,9 +228,25 @@ def _transcribe_via_whisper(
     Download audio with yt-dlp then transcribe with Whisper.
     Slower but works when captions are not available.
     """
+    import shutil
     import yt_dlp
     import whisper
     import tempfile
+
+    # ── Check ffmpeg is installed ──────────────────
+    # yt-dlp's audio postprocessing and Whisper both shell out to the
+    # ffmpeg/ffprobe binaries. pip installing yt-dlp/whisper does NOT
+    # install these — they must come from your OS package manager:
+    #   Ubuntu/Debian : sudo apt-get install ffmpeg
+    #   macOS         : brew install ffmpeg
+    #   Windows       : download from ffmpeg.org and add 'bin' to PATH
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        raise RuntimeError(
+            "ffmpeg/ffprobe not found on this system. Install it first: "
+            "Ubuntu/Debian: 'sudo apt-get install ffmpeg' | "
+            "macOS: 'brew install ffmpeg' | "
+            "Windows: download from ffmpeg.org and add to PATH."
+        )
 
     title = _get_youtube_title(url)
     duration = 0

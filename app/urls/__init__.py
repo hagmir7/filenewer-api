@@ -11,6 +11,7 @@ from .timestamp_urls import urlpatterns as timestamp_urlpatterns
 from .compare_urls import urlpatterns as compare_urlpatterns
 from .ocr_urls import urlpatterns as ocr_urlpatterns
 from .health_urls import urlpatterns as health_urlpatterns
+from .youtube import urlpatterns as youtube_urlpatterns
 
 urlpatterns = (
     pdf_urlpatterns
@@ -26,4 +27,5 @@ urlpatterns = (
     + compare_urlpatterns
     + ocr_urlpatterns
     + health_urlpatterns
+    + youtube_urlpatterns
 )

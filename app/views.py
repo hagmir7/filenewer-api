@@ -104,6 +104,11 @@ from .services.compare_service import (
     compare_texts,
     compare_files,
 )
+
+from .services.youtube import (
+    youtube_to_transcript,
+)
+
 from .services.ocr_service import ocr_pdf
 
 logger = logging.getLogger(__name__)
@@ -6896,3 +6901,89 @@ class SplitExcelView(APIView):
         response["X-Total-Parts"] = len(parts)
         response["X-Split-By"] = split_by
         return response
+
+
+
+
+
+
+
+
+class YouTubeTranscriptView(APIView):
+    """
+    POST /api/tools/youtube-transcript/
+    Transcribe a YouTube video.
+
+    JSON body:
+        {
+            "url"               : "https://www.youtube.com/watch?v=...",
+            "language"          : "en",
+            "output_format"     : "text | srt | vtt | json",
+            "include_timestamps": false,
+            "auto_captions"     : true,
+            "translate_to"      : null
+        }
+    """
+    parser_classes     = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        url                = request.data.get('url')
+        language           = request.data.get('language',           'en')
+        output_format      = request.data.get('output_format',      'text')
+        include_timestamps = request.data.get('include_timestamps', False)
+        auto_captions      = request.data.get('auto_captions',      True)
+        translate_to       = request.data.get('translate_to',       None)
+
+        # ── Validate ──────────────────────────────
+        if not url:
+            return Response(
+                {'error': '"url" is required.'},
+                status=400,
+            )
+
+        if output_format not in ('text', 'srt', 'vtt', 'json'):
+            return Response(
+                {'error': 'output_format must be: text, srt, vtt, or json.'},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool): return val
+            return str(val).lower() == 'true'
+
+        include_timestamps = to_bool(include_timestamps)
+        auto_captions      = to_bool(auto_captions)
+
+        # ── Transcribe ────────────────────────────
+        try:
+            result = youtube_to_transcript(
+                url               =str(url),
+                language          =str(language),
+                output_format     =output_format,
+                include_timestamps=include_timestamps,
+                auto_captions     =auto_captions,
+                translate_to      =translate_to,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except RuntimeError as e:
+            return Response({'error': str(e)}, status=422)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        return Response({
+            'transcript'    : result['transcript'],
+            'title'         : result['title'],
+            'video_id'      : result['video_id'],
+            'url'           : result['url'],
+            'language'      : result['language'],
+            'method'        : result['method'],
+            'duration'      : result['duration'],
+            'duration_str'  : result['duration_str'],
+            'word_count'    : result['word_count'],
+            'char_count'    : result['char_count'],
+            'segment_count' : result['segment_count'],
+            'output_format' : result['output_format'],
+        })

@@ -63,6 +63,7 @@ urlpatterns = [
     path('tools/markdown-to-word', MarkdownToWordView.as_view(), name='markdown-to-word'),
     path('tools/markdown-to-excel', MarkdownToExcelView.as_view(), name='markdown-to-excel'),
     path('tools/excel-to-markdown', ExcelToMarkdownView.as_view(), name='excel-to-markdown'),
+    path('tools/youtube-transcript', YouTubeTranscriptView.as_view(), name='youtube-transcript'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
 ]

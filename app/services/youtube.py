@@ -1,3 +1,6 @@
+import os
+
+
 def youtube_to_transcript(
     url: str,
     language: str = "en",
@@ -65,6 +68,7 @@ def youtube_to_transcript(
         raise ValueError("Cannot extract video ID from URL.")
 
     # ── Strategy 1: YouTube Transcript API ────────
+    api_error_msg = None
     try:
         return _transcribe_via_api(
             video_id=video_id,
@@ -76,7 +80,10 @@ def youtube_to_transcript(
             translate_to=translate_to,
         )
     except Exception as api_error:
-        pass
+        # Save the message now — exception variables are auto-deleted
+        # once this except block ends, so we can't reference `api_error`
+        # later (that's what caused the original bug).
+        api_error_msg = str(api_error)
 
     # ── Strategy 2: yt-dlp + Whisper ──────────────
     try:
@@ -91,7 +98,7 @@ def youtube_to_transcript(
     except Exception as whisper_error:
         raise RuntimeError(
             f"Both transcription methods failed.\n"
-            f"API error: {api_error}\n"
+            f"API error: {api_error_msg}\n"
             f"Whisper error: {whisper_error}"
         )
 

@@ -66,4 +66,5 @@ urlpatterns = [
     path('tools/youtube-transcript', YouTubeTranscriptView.as_view(), name='youtube-transcript'),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     
+    
 ]

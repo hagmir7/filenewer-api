@@ -9,6 +9,7 @@ import subprocess
 # ── Third Party ───────────────────────────────────────────────────────────────
 try:
     import yt_dlp
+
     YTDLP_AVAILABLE = True
 except ImportError:
     YTDLP_AVAILABLE = False
@@ -589,3 +590,16 @@ def _get_extension(filename: str, default: str = "mp4") -> str:
     if "." in filename:
         return filename.rsplit(".", 1)[-1].lower()
     return default
+
+
+
+
+def _seconds_to_time(seconds: float) -> str:
+    """Convert seconds to a human-readable HH:MM:SS.ms string."""
+    seconds = max(0, float(seconds))
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:05.2f}"
+    return f"{minutes:02d}:{secs:05.2f}"

@@ -109,6 +109,10 @@ from .services.youtube import (
     youtube_to_transcript,
 )
 
+from .services.video import (
+    add_voice_to_video,
+)
+
 from .services.ocr_service import ocr_pdf
 
 logger = logging.getLogger(__name__)
@@ -6759,7 +6763,6 @@ class MergeExcelView(APIView):
         return response
 
 
-
 class SplitExcelView(APIView):
     """
     POST /api/tools/excel-split/
@@ -6903,12 +6906,6 @@ class SplitExcelView(APIView):
         return response
 
 
-
-
-
-
-
-
 class YouTubeTranscriptView(APIView):
     """
     POST /api/tools/youtube-transcript/
@@ -6987,3 +6984,214 @@ class YouTubeTranscriptView(APIView):
             'segment_count' : result['segment_count'],
             'output_format' : result['output_format'],
         })
+
+
+class AddVoiceToVideoView(APIView):
+    """
+    POST /api/tools/add-voice-to-video/
+
+    Accepts video + audio as:
+        - Uploaded files (multipart)
+        - URLs (HTTP/HTTPS direct links)
+        - YouTube URLs (audio only)
+
+    Form fields:
+        video               : video file upload            (optional*)
+        audio               : audio file upload            (optional*)
+        video_url           : video URL or path            (optional*)
+        audio_url           : audio URL or YouTube URL     (optional*)
+        (* provide file OR url for each)
+
+        speed_adjust_target : video | audio                (optional)
+                              Required when durations mismatch.
+                              'video' → adjust video speed to match audio
+                              'audio' → adjust audio speed to match video
+        replace_audio       : true | false                 (default: true)
+        volume_video        : 0.0-2.0 (original audio vol) (default: 1.0)
+        volume_audio        : 0.0-2.0 (new audio vol)      (default: 1.0)
+        output_format       : mp4 | avi | mkv | webm       (default: mp4)
+        output_filename     : custom output filename        (optional)
+
+    Flow:
+        1. Submit without speed_adjust_target
+           → If durations match: returns video immediately
+           → If mismatch: returns 422 with duration info + suggestion
+        2. User selects speed_adjust_target based on mismatch info
+        3. Resubmit with speed_adjust_target set
+           → Returns final video
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # ── Files ──────────────────────────────────
+        video_file = request.FILES.get("video", None)
+        audio_file = request.FILES.get("audio", None)
+
+        # ── URLs ───────────────────────────────────
+        video_url = request.data.get("video_url", None)
+        audio_url = request.data.get("audio_url", None)
+
+        # ── Options ────────────────────────────────
+        speed_adjust_target = request.data.get("speed_adjust_target", None)
+        replace_audio = request.data.get("replace_audio", "true")
+        volume_video = request.data.get("volume_video", "1.0")
+        volume_audio = request.data.get("volume_audio", "1.0")
+        output_format = request.data.get("output_format", "mp4")
+        output_filename = request.data.get("output_filename", None)
+
+        # ── Determine sources ─────────────────────
+        video_source = video_file or video_url
+        audio_source = audio_file or audio_url
+        video_filename = (
+            video_file.name
+            if video_file
+            else (video_url.split("/")[-1] if video_url else "video.mp4")
+        )
+        audio_filename = (
+            audio_file.name
+            if audio_file
+            else (audio_url.split("/")[-1] if audio_url else "audio.mp3")
+        )
+
+        # ── Validate ──────────────────────────────
+        if not video_source:
+            return Response(
+                {"error": 'Provide "video" (file upload) or "video_url".'},
+                status=400,
+            )
+        if not audio_source:
+            return Response(
+                {"error": 'Provide "audio" (file upload) or "audio_url".'},
+                status=400,
+            )
+
+        if output_format not in ("mp4", "avi", "mkv", "webm"):
+            return Response(
+                {"error": "output_format must be: mp4, avi, mkv, or webm."},
+                status=400,
+            )
+
+        if speed_adjust_target and speed_adjust_target not in ("video", "audio"):
+            return Response(
+                {"error": "speed_adjust_target must be: video or audio."},
+                status=400,
+            )
+
+        # ── Parse floats ──────────────────────────
+        try:
+            volume_video = float(volume_video)
+            volume_audio = float(volume_audio)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "volume_video and volume_audio must be floats."},
+                status=400,
+            )
+
+        if not (0.0 <= volume_video <= 2.0):
+            return Response(
+                {"error": "volume_video must be between 0.0 and 2.0."},
+                status=400,
+            )
+        if not (0.0 <= volume_audio <= 2.0):
+            return Response(
+                {"error": "volume_audio must be between 0.0 and 2.0."},
+                status=400,
+            )
+
+        # ── Parse booleans ─────────────────────────
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() == "true"
+
+        replace_audio = to_bool(replace_audio)
+
+        # ── Process ───────────────────────────────
+        try:
+            result = add_voice_to_video(
+                video_source=video_source,
+                audio_source=audio_source,
+                speed_adjust_target=speed_adjust_target,
+                volume_video=volume_video,
+                volume_audio=volume_audio,
+                replace_audio=replace_audio,
+                output_format=output_format,
+                video_filename=video_filename,
+                audio_filename=audio_filename,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except RuntimeError as e:
+            return Response({"error": str(e)}, status=422)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        # ── Duration mismatch — ask user ───────────
+        if result.get("mismatch"):
+            return Response(
+                {
+                    "error": "Duration mismatch detected.",
+                    "mismatch": True,
+                    "mismatch_info": result["mismatch_info"],
+                    "action_required": (
+                        "Resubmit with speed_adjust_target set to "
+                        '"video" or "audio" to resolve the mismatch.'
+                    ),
+                    "options": {
+                        "audio": (
+                            f"Adjust audio speed "
+                            f"(ratio: "
+                            f'{round(result["mismatch_info"]["audio_duration"] / result["mismatch_info"]["video_duration"], 4)}'
+                            f") to match video duration of "
+                            f'{result["mismatch_info"]["video_duration_str"]}'
+                        ),
+                        "video": (
+                            f"Adjust video speed "
+                            f"(ratio: "
+                            f'{round(result["mismatch_info"]["video_duration"] / result["mismatch_info"]["audio_duration"], 4)}'
+                            f") to match audio duration of "
+                            f'{result["mismatch_info"]["audio_duration_str"]}'
+                        ),
+                    },
+                },
+                status=422,
+            )
+
+        # ── Output filename ───────────────────────
+        base = (
+            video_filename.rsplit(".", 1)[0]
+            if "." in video_filename
+            else video_filename
+        )
+        if not output_filename:
+            output_filename = f"{base}_with_voice.{output_format}"
+        if not output_filename.endswith(f".{output_format}"):
+            output_filename += f".{output_format}"
+
+        # ── Content type ───────────────────────────
+        content_types = {
+            "mp4": "video/mp4",
+            "avi": "video/x-msvideo",
+            "mkv": "video/x-matroska",
+            "webm": "video/webm",
+        }
+        content_type = content_types.get(output_format, "video/mp4")
+
+        # ── Return video ───────────────────────────
+        response = HttpResponse(
+            result["bytes"],
+            content_type=content_type,
+        )
+        response["Content-Disposition"] = f'attachment; filename="{output_filename}"'
+        response["Content-Length"] = len(result["bytes"])
+        response["X-Video-Duration"] = result["video_duration"]
+        response["X-Audio-Duration"] = result["audio_duration"]
+        response["X-Output-Duration"] = result["output_duration"]
+        response["X-Duration-Match"] = result["duration_match"]
+        response["X-Speed-Adjusted"] = result["speed_adjusted"]
+        response["X-Speed-Ratio"] = result["speed_ratio"]
+        response["X-Method"] = result["method"]
+        response["X-Size-MB"] = result["size_mb"]
+        return response

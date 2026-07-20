@@ -13,6 +13,8 @@ from .ocr_urls import urlpatterns as ocr_urlpatterns
 from .health_urls import urlpatterns as health_urlpatterns
 from .youtube import urlpatterns as youtube_urlpatterns
 
+from .video_urls import urlpatterns as video_urlpatterns
+
 urlpatterns = (
     pdf_urlpatterns
     + csv_urlpatterns
@@ -28,4 +30,5 @@ urlpatterns = (
     + ocr_urlpatterns
     + health_urlpatterns
     + youtube_urlpatterns
+    + video_urlpatterns
 )

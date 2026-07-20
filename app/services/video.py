@@ -451,16 +451,10 @@ def _adjust_video_speed(
     speed_ratio: float,
     ffmpeg: str,
 ):
-    """
-    Adjust video speed using ffmpeg setpts + atempo filters.
-    """
     import subprocess
 
-    # Video: setpts=PTS/speed (inverse of speed_ratio)
-    # Audio: atempo=speed
     pts_factor = 1.0 / speed_ratio
 
-    # Build atempo chain for audio
     audio_filters = []
     ratio = speed_ratio
     if ratio > 2.0:
@@ -486,7 +480,7 @@ def _adjust_video_speed(
         "-i",
         input_path,
         "-filter_complex",
-        (f"[0:v]setpts={pts_factor:.4f}*PTS[v];" f"[0:a]{audio_filter_str}[a]"),
+        f"[0:v]setpts={pts_factor:.4f}*PTS[v];[0:a]{audio_filter_str}[a]",
         "-map",
         "[v]",
         "-map",
@@ -496,8 +490,15 @@ def _adjust_video_speed(
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
-    if not os.path.exists(output_path):
-        raise RuntimeError(f"Video speed adjustment failed: {result.stderr[-500:]}")
+    # Check BOTH exit code and that a non-trivial file was actually written
+    if (
+        result.returncode != 0
+        or not os.path.exists(output_path)
+        or os.path.getsize(output_path) < 1024
+    ):
+        raise RuntimeError(f"Video speed adjustment failed: {result.stderr[-1000:]}")
+    
+    
 
 
 def _build_replace_audio_cmd(
@@ -590,8 +591,6 @@ def _get_extension(filename: str, default: str = "mp4") -> str:
     if "." in filename:
         return filename.rsplit(".", 1)[-1].lower()
     return default
-
-
 
 
 def _seconds_to_time(seconds: float) -> str:

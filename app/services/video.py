@@ -1,3 +1,19 @@
+# ── Standard Library ──────────────────────────────────────────────────────────
+import io
+import os
+import re
+import json
+import tempfile
+import subprocess
+
+# ── Third Party ───────────────────────────────────────────────────────────────
+try:
+    import yt_dlp
+    YTDLP_AVAILABLE = True
+except ImportError:
+    YTDLP_AVAILABLE = False
+
+
 def add_voice_to_video(
     video_source,
     audio_source,

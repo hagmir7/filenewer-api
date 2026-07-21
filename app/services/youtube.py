@@ -444,3 +444,188 @@ def _seconds_to_vtt_time(seconds: float) -> str:
     m = (s % 3600) // 60
     s = s % 60
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def download_youtube_video(
+    url: str,
+    quality: str = "best",
+    format_type: str = "mp4",
+    max_height: int = None,
+) -> dict:
+    """
+    Download a YouTube video/short.
+
+    Args:
+        url         : YouTube video/shorts URL
+        quality     : 'best' | 'worst' | specific height e.g. '1080' | '720'
+        format_type : mp4 | webm | mkv          (default: mp4)
+        max_height  : cap resolution e.g. 1080, 720, 480 (default: None = highest available)
+
+    Returns:
+        {
+            'bytes'      : bytes,
+            'title'      : str,
+            'duration'   : int,
+            'width'      : int,
+            'height'     : int,
+            'fps'        : float,
+            'filesize_mb': float,
+            'video_id'   : str,
+            'ext'        : str,
+        }
+    """
+    import yt_dlp
+    import tempfile
+    import re
+
+    if not url or not url.strip():
+        raise ValueError("URL is required.")
+
+    url = url.strip()
+
+    youtube_pattern = re.compile(
+        r"(https?://)?(www\.)?"
+        r"(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)"
+        r"[\w-]+"
+    )
+    if not youtube_pattern.match(url):
+        raise ValueError(
+            "Invalid YouTube URL. Supported: youtube.com/watch?v=..., "
+            "youtu.be/..., youtube.com/shorts/..."
+        )
+
+    if format_type not in ("mp4", "webm", "mkv"):
+        format_type = "mp4"
+
+    # ── Build format selector ─────────────────────
+    if max_height:
+        height_filter = f"[height<={max_height}]"
+    else:
+        height_filter = ""
+
+    if quality == "worst":
+        fmt = f"worst{height_filter}"
+    else:
+        fmt = f"bestvideo{height_filter}+bestaudio/" f"best{height_filter}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        outtmpl = os.path.join(tmp, "%(id)s.%(ext)s")
+
+        ydl_opts = {
+            "format": fmt,
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+            "merge_output_format": format_type,
+            "postprocessors": [
+                {
+                    "key": "FFmpegVideoConvertor",
+                    "preferedformat": format_type,
+                }
+            ],
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+        video_id = info.get("id", "")
+        title = info.get("title", "video")
+        duration = info.get("duration", 0)
+        width = info.get("width", 0)
+        height = info.get("height", 0)
+        fps = info.get("fps", 0)
+
+        # ── Find downloaded file ────────────────────
+        output_path = None
+        for f in os.listdir(tmp):
+            if f.startswith(video_id):
+                output_path = os.path.join(tmp, f)
+                break
+
+        if not output_path or not os.path.exists(output_path):
+            raise RuntimeError("Download failed — output file not found.")
+
+        with open(output_path, "rb") as f:
+            video_bytes = f.read()
+
+    return {
+        "bytes": video_bytes,
+        "title": title,
+        "duration": duration,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "filesize_mb": round(len(video_bytes) / (1024 * 1024), 2),
+        "video_id": video_id,
+        "ext": format_type,
+    }
+
+
+def get_youtube_video_info(url: str) -> dict:
+    """
+    Get available formats/qualities for a YouTube video without downloading.
+
+    Args:
+        url : YouTube video/shorts URL
+
+    Returns:
+        { 'title', 'duration', 'formats': [ {height, ext, filesize, format_id} ] }
+    """
+    import yt_dlp
+    import re
+
+    if not url or not url.strip():
+        raise ValueError("URL is required.")
+
+    youtube_pattern = re.compile(
+        r"(https?://)?(www\.)?"
+        r"(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)"
+        r"[\w-]+"
+    )
+    if not youtube_pattern.match(url.strip()):
+        raise ValueError("Invalid YouTube URL.")
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    formats = []
+    seen_heights = set()
+
+    for f in info.get("formats", []):
+        height = f.get("height")
+        if not height or height in seen_heights:
+            continue
+        if f.get("vcodec") == "none":
+            continue
+        seen_heights.add(height)
+        formats.append(
+            {
+                "height": height,
+                "width": f.get("width"),
+                "ext": f.get("ext"),
+                "fps": f.get("fps"),
+                "filesize_mb": round(
+                    (f.get("filesize") or f.get("filesize_approx") or 0)
+                    / (1024 * 1024),
+                    2,
+                )
+                or None,
+                "format_id": f.get("format_id"),
+            }
+        )
+
+    formats.sort(key=lambda x: x["height"] or 0, reverse=True)
+
+    return {
+        "title": info.get("title", ""),
+        "duration": info.get("duration", 0),
+        "video_id": info.get("id", ""),
+        "is_short": (info.get("duration") or 0) <= 60,
+        "formats": formats,
+    }

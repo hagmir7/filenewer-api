@@ -107,7 +107,10 @@ from .services.compare_service import (
 
 from .services.youtube import (
     youtube_to_transcript,
+    download_youtube_video,
+    get_youtube_video_info, 
 )
+
 
 from .services.video import (
     add_voice_to_video,
@@ -7195,3 +7198,113 @@ class AddVoiceToVideoView(APIView):
         response["X-Method"] = result["method"]
         response["X-Size-MB"] = result["size_mb"]
         return response
+
+
+
+
+
+
+
+
+class YouTubeDownloadView(APIView):
+    """
+    POST /api/tools/youtube-download/
+    Download a YouTube video/short at the highest available quality.
+
+    JSON body:
+        {
+            "url"        : "https://www.youtube.com/shorts/...",
+            "quality"    : "best | worst",
+            "format_type": "mp4 | webm | mkv",
+            "max_height" : 1080
+        }
+    """
+    parser_classes     = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        url         = request.data.get('url')
+        quality     = request.data.get('quality',     'best')
+        format_type = request.data.get('format_type', 'mp4')
+        max_height  = request.data.get('max_height',  None)
+
+        if not url:
+            return Response({'error': '"url" is required.'}, status=400)
+
+        if quality not in ('best', 'worst'):
+            return Response(
+                {'error': 'quality must be: best or worst.'}, status=400
+            )
+        if format_type not in ('mp4', 'webm', 'mkv'):
+            return Response(
+                {'error': 'format_type must be: mp4, webm, or mkv.'}, status=400
+            )
+
+        if max_height is not None:
+            try:
+                max_height = int(max_height)
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'max_height must be an integer.'}, status=400
+                )
+
+        try:
+            result = download_youtube_video(
+                url        =str(url),
+                quality    =quality,
+                format_type=format_type,
+                max_height =max_height,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except RuntimeError as e:
+            return Response({'error': str(e)}, status=422)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        filename = f'{result["video_id"]}.{result["ext"]}'
+        content_types = {
+            'mp4' : 'video/mp4',
+            'webm': 'video/webm',
+            'mkv' : 'video/x-matroska',
+        }
+
+        response = HttpResponse(
+            result['bytes'],
+            content_type=content_types.get(result['ext'], 'video/mp4'),
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length']      = len(result['bytes'])
+        response['X-Title']             = result['title']
+        response['X-Duration']          = result['duration']
+        response['X-Width']             = result['width']
+        response['X-Height']            = result['height']
+        response['X-Filesize-MB']       = result['filesize_mb']
+        return response
+
+
+class YouTubeVideoInfoView(APIView):
+    """
+    POST /api/tools/youtube-info/
+    Get available quality/format options for a YouTube video without downloading.
+
+    JSON body:
+        { "url": "https://www.youtube.com/shorts/..." }
+    """
+    parser_classes     = [JSONParser]
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        url = request.data.get('url')
+
+        if not url:
+            return Response({'error': '"url" is required.'}, status=400)
+
+        try:
+            result = get_youtube_video_info(str(url))
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        return Response(result)
